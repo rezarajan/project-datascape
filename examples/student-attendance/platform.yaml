@@ -1,0 +1,74 @@
+apiVersion: platform.datascape.dev/v1alpha1
+kind: Target
+metadata:
+  name: local
+  namespace: education
+spec:
+  type: compose
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: SecretReference
+metadata:
+  name: student-records-db-credentials
+  namespace: education
+spec:
+  backend: env
+  keys:
+    - username
+    - password
+---
+apiVersion: connections.datascape.dev/v1alpha1
+kind: DatabaseConnection
+metadata:
+  name: student-records-db
+  namespace: education
+spec:
+  engine: postgres
+  host: relational-source
+  port: 5432
+  database: attendance
+  credentialsRef: SecretReference/student-records-db-credentials
+---
+apiVersion: sources.datascape.dev/v1alpha1
+kind: RelationalSource
+metadata:
+  name: student-records
+  namespace: education
+spec:
+  connectionRef: DatabaseConnection/student-records-db
+  tables:
+    - student_attendance
+---
+apiVersion: streams.datascape.dev/v1alpha1
+kind: EventStream
+metadata:
+  name: attendance-changes
+  namespace: education
+spec:
+  eventClass: change
+---
+apiVersion: stores.datascape.dev/v1alpha1
+kind: ObjectStore
+metadata:
+  name: evidence-store
+  namespace: education
+spec:
+  bucket: attendance-evidence
+---
+apiVersion: bindings.datascape.dev/v1alpha1
+kind: CDCBinding
+metadata:
+  name: student-records-change-stream
+  namespace: education
+spec:
+  sourceRef: RelationalSource/student-records
+  streamRef: EventStream/attendance-changes
+---
+apiVersion: bindings.datascape.dev/v1alpha1
+kind: StreamArchiveBinding
+metadata:
+  name: attendance-changes-object-store
+  namespace: education
+spec:
+  streamRef: EventStream/attendance-changes
+  objectStoreRef: ObjectStore/evidence-store

@@ -1,0 +1,13 @@
+apiVersion: platform.datascape.dev/v1alpha1
+kind: RuntimeProfile
+metadata:
+  name: single-host-production
+spec:
+  target: compose
+  availability:
+    class: single-host-production
+    failureDomains: 1
+    minimumReplicas: 1
+  development:
+    enabled: false
+    allowUnpinnedImages: false

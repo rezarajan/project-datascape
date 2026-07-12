@@ -1,0 +1,847 @@
+apiVersion: platform.datascape.dev/v1alpha1
+kind: Target
+metadata:
+  name: reference
+  namespace: education
+spec:
+  type: compose
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: SecretReference
+metadata:
+  name: postgres-credentials
+  namespace: education
+spec:
+  backend: env
+  keys: [username, password]
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: SecretReference
+metadata:
+  name: object-store-credentials
+  namespace: education
+spec:
+  backend: env
+  keys: [accessKey, secretKey]
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: SecretReference
+metadata:
+  name: metadata-db-credentials
+  namespace: education
+spec:
+  backend: env
+  keys: [username, password]
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: SecretReference
+metadata:
+  name: lineage-db-credentials
+  namespace: education
+spec:
+  backend: env
+  keys: [username, password]
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: Provider
+metadata:
+  name: reference-source
+  namespace: education
+spec:
+  type: datascape.dev/source
+  packageVersion: 0.1.0
+  contractVersion: v1alpha1
+  rendererContract: datascape.dev/provider-plan/v1alpha1
+  targetCompatibility: [compose]
+  capabilities: [datascape.dev/database.provision, datascape.dev/source.relational, datascape.dev/source.change-stream]
+  bindingKinds: [CDCBinding]
+  conformance: [SOURCE-001, CDC-001]
+  services:
+    - name: postgres-source
+      image: postgres:18-alpine
+      restart: unless-stopped
+      command: [postgres, -c, wal_level=logical]
+      stopGracePeriod: 30s
+      ports: [127.0.0.1:55432:5432]
+      environment:
+        POSTGRES_DB: attendance
+        POSTGRES_USER: ${EDUCATION_POSTGRES_CREDENTIALS_USERNAME:-datascape}
+        POSTGRES_PASSWORD: "${EDUCATION_POSTGRES_CREDENTIALS_PASSWORD:?set by reference-up}"
+      volumes: ["./jobs/postgres:/docker-entrypoint-initdb.d:ro"]
+      healthcheck: [CMD-SHELL, "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      securityOpt: ["no-new-privileges:true"]
+      memory: 1g
+      pidsLimit: 256
+    - name: sqlite-source
+      image: python:3.13-alpine
+      restart: unless-stopped
+      command: [python, -c, "import sqlite3,time; db=sqlite3.connect('/data/supplementary.db'); db.execute('create table if not exists school_context(school_id text primary key, district text, school_type text)'); db.executemany('insert or ignore into school_context values(?,?,?)',[('SCH-001','North','Primary'),('SCH-002','South','Secondary')]); db.commit(); time.sleep(10**9)"]
+      healthcheck: [CMD-SHELL, "test -s /data/supplementary.db"]
+      capDrop: [ALL]
+      securityOpt: ["no-new-privileges:true"]
+      memory: 256m
+      pidsLimit: 64
+    - name: cdc-connector
+      image: quay.io/debezium/connect:3.6.0.Final
+      restart: unless-stopped
+      dependsOn: [postgres-source, attendance-changes]
+      environment:
+        BOOTSTRAP_SERVERS: attendance-changes:9092
+        GROUP_ID: datascape-reference-cdc
+        CONFIG_STORAGE_TOPIC: datascape-reference-connect-configs
+        OFFSET_STORAGE_TOPIC: datascape-reference-connect-offsets
+        STATUS_STORAGE_TOPIC: datascape-reference-connect-status
+        CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+        OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+        STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      ports: [127.0.0.1:18083:8083]
+      healthcheck: [CMD-SHELL, "curl -fsS http://localhost:8083/connectors"]
+      securityOpt: ["no-new-privileges:true"]
+      memory: 1g
+      pidsLimit: 256
+    - name: cdc-register
+      image: python:3.13-alpine
+      command: [python, /opt/datascape/debezium/register_connector.py]
+      dependsOn: [cdc-connector]
+      volumes: ["./jobs:/opt/datascape:ro"]
+      environment:
+        EDUCATION_POSTGRES_CREDENTIALS_USERNAME: ${EDUCATION_POSTGRES_CREDENTIALS_USERNAME:-datascape}
+        EDUCATION_POSTGRES_CREDENTIALS_PASSWORD: "${EDUCATION_POSTGRES_CREDENTIALS_PASSWORD:?set by reference-up}"
+      securityOpt: ["no-new-privileges:true"]
+      memory: 128m
+      pidsLimit: 32
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: ProviderInstance
+metadata:
+  name: reference-source
+  namespace: education
+spec:
+  providerRef: Provider/reference-source
+  target: compose
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: Provider
+metadata:
+  name: reference-stream
+  namespace: education
+spec:
+  type: datascape.dev/stream
+  packageVersion: 0.1.0
+  contractVersion: v1alpha1
+  rendererContract: datascape.dev/provider-plan/v1alpha1
+  targetCompatibility: [compose]
+  capabilities: [datascape.dev/stream.publish, datascape.dev/schema.register]
+  bindingKinds: [StreamPublishBinding]
+  services:
+    - name: attendance-changes
+      image: docker.redpanda.com/redpandadata/redpanda:v26.1.12
+      restart: unless-stopped
+      command: [redpanda, start, --overprovisioned, --smp, "1", --memory, 1G, --reserve-memory, 0M, --node-id, "0", --check=false, --kafka-addr, PLAINTEXT://0.0.0.0:9092, --advertise-kafka-addr, PLAINTEXT://attendance-changes:9092]
+      ports: [127.0.0.1:19092:9092, 127.0.0.1:19644:9644]
+      healthcheck: [CMD-SHELL, "rpk cluster health -X brokers=localhost:9092 | grep -E 'Healthy:.+true' || exit 1"]
+      capDrop: [ALL]
+      securityOpt: ["no-new-privileges:true"]
+      memory: 2g
+      pidsLimit: 256
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: ProviderInstance
+metadata:
+  name: reference-stream
+  namespace: education
+spec:
+  providerRef: Provider/reference-stream
+  target: compose
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: Provider
+metadata:
+  name: reference-store
+  namespace: education
+spec:
+  type: datascape.dev/store
+  packageVersion: 0.1.0
+  contractVersion: v1alpha1
+  rendererContract: datascape.dev/provider-plan/v1alpha1
+  targetCompatibility: [compose]
+  capabilities: [datascape.dev/store.object, datascape.dev/audit.record]
+  bindingKinds: [StreamArchiveBinding, AuditBinding]
+  services:
+    - name: lakehouse-store
+      image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+      restart: unless-stopped
+      command: [server, /data, --console-address, ":9001"]
+      ports: [127.0.0.1:19000:9000, 127.0.0.1:19001:9001]
+      environment:
+        MINIO_ROOT_USER: ${EDUCATION_OBJECT_STORE_CREDENTIALS_ACCESSKEY:-datascape}
+        MINIO_ROOT_PASSWORD: "${EDUCATION_OBJECT_STORE_CREDENTIALS_SECRETKEY:?set by reference-up}"
+      healthcheck: [CMD-SHELL, "curl -fsS http://localhost:9000/minio/health/live"]
+      capDrop: [ALL]
+      securityOpt: ["no-new-privileges:true"]
+      memory: 1g
+      pidsLimit: 256
+    - name: object-store-bootstrap
+      image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+      command: [sh, -c, "mc alias set local http://lakehouse-store:9000 $${EDUCATION_OBJECT_STORE_CREDENTIALS_ACCESSKEY} $${EDUCATION_OBJECT_STORE_CREDENTIALS_SECRETKEY} && mc mb --ignore-existing local/datascape-lakehouse"]
+      dependsOn: [lakehouse-store]
+      environment:
+        EDUCATION_OBJECT_STORE_CREDENTIALS_ACCESSKEY: ${EDUCATION_OBJECT_STORE_CREDENTIALS_ACCESSKEY:-datascape}
+        EDUCATION_OBJECT_STORE_CREDENTIALS_SECRETKEY: "${EDUCATION_OBJECT_STORE_CREDENTIALS_SECRETKEY:?set by reference-up}"
+      capDrop: [ALL]
+      securityOpt: ["no-new-privileges:true"]
+      memory: 128m
+      pidsLimit: 32
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: ProviderInstance
+metadata:
+  name: reference-store
+  namespace: education
+spec:
+  providerRef: Provider/reference-store
+  target: compose
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: Provider
+metadata:
+  name: reference-catalog
+  namespace: education
+spec:
+  type: datascape.dev/catalog
+  packageVersion: 0.1.0
+  contractVersion: v1alpha1
+  rendererContract: datascape.dev/provider-plan/v1alpha1
+  targetCompatibility: [compose]
+  capabilities: [datascape.dev/catalog.table]
+  services:
+    - name: iceberg-catalog
+      image: ghcr.io/projectnessie/nessie:0.108.1
+      restart: unless-stopped
+      ports: [127.0.0.1:19120:19120]
+      environment:
+        QUARKUS_HTTP_PORT: "19120"
+        NESSIE_VERSION_STORE_TYPE: ROCKSDB
+        NESSIE_VERSION_STORE_PERSIST_ROCKS_DATABASE_PATH: /var/lib/nessie
+      healthcheck: [CMD-SHELL, "wget -qO- http://localhost:19120/q/health/ready"]
+      capDrop: [ALL]
+      securityOpt: ["no-new-privileges:true"]
+      memory: 1g
+      pidsLimit: 256
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: ProviderInstance
+metadata:
+  name: reference-catalog
+  namespace: education
+spec:
+  providerRef: Provider/reference-catalog
+  target: compose
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: Provider
+metadata:
+  name: reference-pipeline
+  namespace: education
+spec:
+  type: datascape.dev/pipeline
+  packageVersion: 0.1.0
+  contractVersion: v1alpha1
+  rendererContract: datascape.dev/provider-plan/v1alpha1
+  targetCompatibility: [compose]
+  capabilities: [datascape.dev/pipeline.run, datascape.dev/ingest.batch, datascape.dev/ingest.stream, datascape.dev/transform.table, datascape.dev/quality.evaluate]
+  bindingKinds: [PipelineBinding, BatchIngestBinding, StreamIngestBinding, TransformBinding]
+  services:
+    - name: lakehouse-pipeline
+      image: tabulario/spark-iceberg:3.5.5_1.8.1
+      restart: unless-stopped
+      command: [sleep, infinity]
+      dependsOn: [postgres-source, sqlite-source, attendance-changes, cdc-register, lakehouse-store, object-store-bootstrap, iceberg-catalog, lineage-backend]
+      dependsOnCompleted: [cdc-register, object-store-bootstrap]
+      volumes: ["./jobs:/opt/datascape/jobs:ro"]
+      environment:
+        EDUCATION_POSTGRES_CREDENTIALS_USERNAME: ${EDUCATION_POSTGRES_CREDENTIALS_USERNAME:-datascape}
+        EDUCATION_POSTGRES_CREDENTIALS_PASSWORD: ${EDUCATION_POSTGRES_CREDENTIALS_PASSWORD:?set by reference-up}
+        EDUCATION_OBJECT_STORE_CREDENTIALS_ACCESSKEY: ${EDUCATION_OBJECT_STORE_CREDENTIALS_ACCESSKEY:-datascape}
+        EDUCATION_OBJECT_STORE_CREDENTIALS_SECRETKEY: ${EDUCATION_OBJECT_STORE_CREDENTIALS_SECRETKEY:?set by reference-up}
+      healthcheck: [CMD-SHELL, "test -x /opt/spark/bin/spark-submit"]
+      capDrop: [ALL]
+      securityOpt: ["no-new-privileges:true"]
+      memory: 4g
+      pidsLimit: 512
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: ProviderInstance
+metadata:
+  name: reference-pipeline
+  namespace: education
+spec:
+  providerRef: Provider/reference-pipeline
+  target: compose
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: Provider
+metadata:
+  name: reference-query
+  namespace: education
+spec:
+  type: datascape.dev/query
+  packageVersion: 0.1.0
+  contractVersion: v1alpha1
+  rendererContract: datascape.dev/provider-plan/v1alpha1
+  targetCompatibility: [compose]
+  capabilities: [datascape.dev/query.sql]
+  services:
+    - name: query-engine
+      image: trinodb/trino:482
+      restart: unless-stopped
+      ports: [127.0.0.1:18080:8080]
+      dependsOn: [iceberg-catalog, lakehouse-store]
+      volumes: ["./jobs/trino:/etc/trino/catalog:ro"]
+      healthcheck: [CMD-SHELL, "curl -fsS http://localhost:8080/v1/info"]
+      capDrop: [ALL]
+      securityOpt: ["no-new-privileges:true"]
+      memory: 2g
+      pidsLimit: 512
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: ProviderInstance
+metadata:
+  name: reference-query
+  namespace: education
+spec:
+  providerRef: Provider/reference-query
+  target: compose
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: Provider
+metadata:
+  name: reference-lineage
+  namespace: education
+spec:
+  type: datascape.dev/lineage
+  packageVersion: 0.1.0
+  contractVersion: v1alpha1
+  rendererContract: datascape.dev/provider-plan/v1alpha1
+  targetCompatibility: [compose]
+  capabilities: [datascape.dev/lineage.admit]
+  bindingKinds: [LineageBinding]
+  services:
+    - name: lineage-db
+      image: postgres:18-alpine
+      restart: unless-stopped
+      environment:
+        POSTGRES_DB: marquez
+        POSTGRES_USER: ${EDUCATION_LINEAGE_DB_CREDENTIALS_USERNAME:-marquez}
+        POSTGRES_PASSWORD: "${EDUCATION_LINEAGE_DB_CREDENTIALS_PASSWORD:?set by reference-up}"
+      volumes: ["lineage-db-data:/var/lib/postgresql/data"]
+      healthcheck: [CMD-SHELL, "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      securityOpt: ["no-new-privileges:true"]
+      memory: 1g
+      pidsLimit: 256
+    - name: lineage-backend
+      image: marquezproject/marquez:0.51.1
+      restart: unless-stopped
+      ports: [127.0.0.1:15000:5000, 127.0.0.1:15001:5001]
+      dependsOn: [lineage-db]
+      environment:
+        MARQUEZ_PORT: "5000"
+        MARQUEZ_ADMIN_PORT: "5001"
+        POSTGRES_HOST: lineage-db
+        POSTGRES_PORT: "5432"
+        POSTGRES_DB: marquez
+        POSTGRES_USER: ${EDUCATION_LINEAGE_DB_CREDENTIALS_USERNAME:-marquez}
+        POSTGRES_PASSWORD: "${EDUCATION_LINEAGE_DB_CREDENTIALS_PASSWORD:?set by reference-up}"
+        SEARCH_ENABLED: "false"
+      healthcheck: [CMD-SHELL, "curl -fsS http://localhost:5000/api/v1/namespaces"]
+      capDrop: [ALL]
+      securityOpt: ["no-new-privileges:true"]
+      memory: 1g
+      pidsLimit: 256
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: ProviderInstance
+metadata:
+  name: reference-lineage
+  namespace: education
+spec:
+  providerRef: Provider/reference-lineage
+  target: compose
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: Provider
+metadata:
+  name: reference-metadata
+  namespace: education
+spec:
+  type: datascape.dev/metadata
+  packageVersion: 0.1.0
+  contractVersion: v1alpha1
+  rendererContract: datascape.dev/provider-plan/v1alpha1
+  targetCompatibility: [compose]
+  capabilities: [datascape.dev/metadata.catalog]
+  services:
+    - name: metadata-db
+      image: postgres:18-alpine
+      restart: unless-stopped
+      profiles: [governance]
+      environment:
+        POSTGRES_DB: openmetadata_db
+        POSTGRES_USER: ${EDUCATION_METADATA_DB_CREDENTIALS_USERNAME:-openmetadata_user}
+        POSTGRES_PASSWORD: "${EDUCATION_METADATA_DB_CREDENTIALS_PASSWORD:?set by reference-up}"
+      volumes: ["metadata-db-data:/var/lib/postgresql/data"]
+      healthcheck: [CMD-SHELL, "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      securityOpt: ["no-new-privileges:true"]
+      memory: 1g
+      pidsLimit: 256
+    - name: metadata-search
+      image: opensearchproject/opensearch:3.3.0
+      restart: unless-stopped
+      profiles: [governance]
+      environment:
+        discovery.type: single-node
+        DISABLE_SECURITY_PLUGIN: "true"
+        OPENSEARCH_JAVA_OPTS: -Xms1g -Xmx1g
+      volumes: ["metadata-search-data:/usr/share/opensearch/data"]
+      healthcheck: [CMD-SHELL, "curl -fsS http://localhost:9200/_cluster/health | grep -Eq 'green|yellow'"]
+      capDrop: [ALL]
+      securityOpt: ["no-new-privileges:true"]
+      memory: 2g
+      pidsLimit: 512
+    - name: metadata-migrate
+      image: docker.getcollate.io/openmetadata/server:1.13.1
+      profiles: [governance]
+      command: [./bootstrap/openmetadata-ops.sh, migrate]
+      dependsOn: [metadata-db, metadata-search]
+      environment:
+        DB_DRIVER_CLASS: org.postgresql.Driver
+        DB_SCHEME: postgresql
+        DB_PARAMS: allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC
+        DB_USER: ${EDUCATION_METADATA_DB_CREDENTIALS_USERNAME:-openmetadata_user}
+        DB_USER_PASSWORD: "${EDUCATION_METADATA_DB_CREDENTIALS_PASSWORD:?set by reference-up}"
+        DB_HOST: metadata-db
+        DB_PORT: "5432"
+        OM_DATABASE: openmetadata_db
+        ELASTICSEARCH_HOST: metadata-search
+        ELASTICSEARCH_PORT: "9200"
+        ELASTICSEARCH_SCHEME: http
+        SEARCH_TYPE: opensearch
+        PIPELINE_SERVICE_CLIENT_ENABLED: "false"
+        SECRET_MANAGER: noop
+      capDrop: [ALL]
+      securityOpt: ["no-new-privileges:true"]
+      memory: 2g
+      pidsLimit: 512
+    - name: metadata-catalog
+      image: docker.getcollate.io/openmetadata/server:1.13.1
+      restart: unless-stopped
+      profiles: [governance]
+      ports: [127.0.0.1:18585:8585]
+      dependsOn: [metadata-db, metadata-search, metadata-migrate, query-engine]
+      dependsOnCompleted: [metadata-migrate]
+      environment:
+        OPENMETADATA_CLUSTER_NAME: datascape-reference
+        SERVER_PORT: "8585"
+        SERVER_ADMIN_PORT: "8586"
+        AUTHENTICATION_PROVIDER: basic
+        DB_DRIVER_CLASS: org.postgresql.Driver
+        DB_SCHEME: postgresql
+        DB_PARAMS: allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC
+        DB_USER: ${EDUCATION_METADATA_DB_CREDENTIALS_USERNAME:-openmetadata_user}
+        DB_USER_PASSWORD: "${EDUCATION_METADATA_DB_CREDENTIALS_PASSWORD:?set by reference-up}"
+        DB_HOST: metadata-db
+        DB_PORT: "5432"
+        OM_DATABASE: openmetadata_db
+        ELASTICSEARCH_HOST: metadata-search
+        ELASTICSEARCH_PORT: "9200"
+        ELASTICSEARCH_SCHEME: http
+        SEARCH_TYPE: opensearch
+        PIPELINE_SERVICE_CLIENT_ENABLED: "false"
+        SECRET_MANAGER: noop
+      healthcheck: [CMD, wget, -q, --spider, http://localhost:8586/healthcheck]
+      securityOpt: ["no-new-privileges:true"]
+      memory: 3g
+      pidsLimit: 512
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: ProviderInstance
+metadata:
+  name: reference-metadata
+  namespace: education
+spec:
+  providerRef: Provider/reference-metadata
+  target: compose
+---
+apiVersion: storage.datascape.dev/v1alpha1
+kind: StorageClass
+metadata:
+  name: local-durable
+spec:
+  provisioner: compose.named
+  targetCompatibility: [compose]
+  reclaimPolicy: Retain
+  volumeBindingMode: Immediate
+  allowVolumeExpansion: true
+  default: true
+  parameters: {}
+---
+apiVersion: storage.datascape.dev/v1alpha1
+kind: PersistentVolume
+metadata:
+  name: sqlite-reference-file
+spec:
+  storageClassRef: StorageClass/local-durable
+  capacity: 1Gi
+  accessModes: [ReadWriteOnce]
+  ownership: imported
+  verification:
+    checks:
+      - id: SQLITE-FILE-001
+        description: supplementary.db exists and is readable through the mounted claim
+  source:
+    hostPath: ./state/sqlite
+---
+apiVersion: storage.datascape.dev/v1alpha1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: education
+spec:
+  capacity: 10Gi
+  accessModes: [ReadWriteOnce]
+---
+apiVersion: storage.datascape.dev/v1alpha1
+kind: PersistentVolumeClaim
+metadata:
+  name: sqlite-data
+  namespace: education
+spec:
+  volumeRef: PersistentVolume/sqlite-reference-file
+  capacity: 1Gi
+  accessModes: [ReadWriteOnce]
+---
+apiVersion: storage.datascape.dev/v1alpha1
+kind: PersistentVolumeClaim
+metadata:
+  name: stream-data
+  namespace: education
+spec:
+  capacity: 10Gi
+  accessModes: [ReadWriteOnce]
+---
+apiVersion: storage.datascape.dev/v1alpha1
+kind: PersistentVolumeClaim
+metadata:
+  name: object-store-data
+  namespace: education
+spec:
+  capacity: 50Gi
+  accessModes: [ReadWriteOnce]
+---
+apiVersion: storage.datascape.dev/v1alpha1
+kind: PersistentVolumeClaim
+metadata:
+  name: catalog-data
+  namespace: education
+spec:
+  capacity: 5Gi
+  accessModes: [ReadWriteOnce]
+---
+apiVersion: databases.datascape.dev/v1alpha1
+kind: DatabaseClass
+metadata:
+  name: postgres-18
+spec:
+  engine: postgresql
+  version: "18"
+  providerInstanceRef: ProviderInstance/education/reference-source
+  supportedConnectorClasses: [postgres-jdbc, postgres-logical-replication]
+  storage: {required: true}
+  parameters: {}
+---
+apiVersion: databases.datascape.dev/v1alpha1
+kind: DatabaseClass
+metadata:
+  name: sqlite-file
+spec:
+  engine: sqlite
+  version: "3"
+  providerInstanceRef: ProviderInstance/education/reference-source
+  supportedConnectorClasses: [sqlite-odbc]
+  storage: {required: true}
+  parameters: {}
+---
+apiVersion: connections.datascape.dev/v1alpha1
+kind: ConnectorClass
+metadata:
+  name: postgres-jdbc
+spec:
+  interface: jdbc
+  transport: tcp
+  driver: org.postgresql.Driver
+  operations: [query, snapshot]
+  compatibleEngines: [postgresql]
+  providerInstanceRef: ProviderInstance/education/reference-source
+  targetCompatibility: [compose]
+  parameters: {}
+---
+apiVersion: connections.datascape.dev/v1alpha1
+kind: ConnectorClass
+metadata:
+  name: postgres-logical-replication
+spec:
+  interface: native
+  transport: tcp
+  driver: io.debezium.connector.postgresql.PostgresConnector
+  operations: [snapshot, change-stream]
+  compatibleEngines: [postgresql]
+  providerInstanceRef: ProviderInstance/education/reference-source
+  targetCompatibility: [compose]
+  parameters: {}
+---
+apiVersion: connections.datascape.dev/v1alpha1
+kind: ConnectorClass
+metadata:
+  name: sqlite-odbc
+spec:
+  interface: odbc
+  transport: file
+  driver: libsqlite3odbc.so
+  operations: [query, snapshot]
+  compatibleEngines: [sqlite]
+  providerInstanceRef: ProviderInstance/education/reference-source
+  targetCompatibility: [compose]
+  parameters: {}
+---
+apiVersion: databases.datascape.dev/v1alpha1
+kind: DatabaseInstance
+metadata:
+  name: postgres-source
+  namespace: education
+spec:
+  classRef: DatabaseClass/postgres-18
+  storageClaimRef: PersistentVolumeClaim/postgres-data
+  credentialsRef: SecretReference/postgres-credentials
+  database: attendance
+  providerInstanceRef: ProviderInstance/reference-source
+  capabilities: [datascape.dev/database.provision]
+  parameters: {}
+---
+apiVersion: databases.datascape.dev/v1alpha1
+kind: DatabaseInstance
+metadata:
+  name: sqlite-source
+  namespace: education
+spec:
+  classRef: DatabaseClass/sqlite-file
+  storageClaimRef: PersistentVolumeClaim/sqlite-data
+  database: supplementary
+  providerInstanceRef: ProviderInstance/reference-source
+  capabilities: [datascape.dev/database.provision]
+  parameters: {}
+---
+apiVersion: connections.datascape.dev/v1alpha1
+kind: DatabaseConnection
+metadata:
+  name: postgres-source
+  namespace: education
+spec:
+  instanceRef: DatabaseInstance/postgres-source
+  connectorClassRef: ConnectorClass/postgres-jdbc
+  credentialsRef: SecretReference/postgres-credentials
+  endpoint: {host: postgres-source, port: 5432}
+  database: attendance
+---
+apiVersion: connections.datascape.dev/v1alpha1
+kind: DatabaseConnection
+metadata:
+  name: sqlite-source
+  namespace: education
+spec:
+  instanceRef: DatabaseInstance/sqlite-source
+  connectorClassRef: ConnectorClass/sqlite-odbc
+  claimRef: PersistentVolumeClaim/sqlite-data
+  file: {path: /data/supplementary.db}
+  database: supplementary
+---
+apiVersion: sources.datascape.dev/v1alpha1
+kind: RelationalSource
+metadata:
+  name: postgres-attendance
+  namespace: education
+spec:
+  connectionRef: DatabaseConnection/postgres-source
+  providerInstanceRef: ProviderInstance/reference-source
+  tables: [student_attendance]
+---
+apiVersion: sources.datascape.dev/v1alpha1
+kind: RelationalSource
+metadata:
+  name: sqlite-school-context
+  namespace: education
+spec:
+  connectionRef: DatabaseConnection/sqlite-source
+  providerInstanceRef: ProviderInstance/reference-source
+  tables: [school_context]
+---
+apiVersion: streams.datascape.dev/v1alpha1
+kind: EventStream
+metadata:
+  name: attendance-changes
+  namespace: education
+spec:
+  providerInstanceRef: ProviderInstance/reference-stream
+  eventClass: change
+---
+apiVersion: stores.datascape.dev/v1alpha1
+kind: ObjectStore
+metadata:
+  name: lakehouse-store
+  namespace: education
+spec:
+  providerInstanceRef: ProviderInstance/reference-store
+  bucket: datascape-lakehouse
+---
+apiVersion: catalogs.datascape.dev/v1alpha1
+kind: TableCatalog
+metadata:
+  name: iceberg-catalog
+  namespace: education
+spec:
+  providerInstanceRef: ProviderInstance/reference-catalog
+  tableFormat: iceberg
+  warehouse: s3://datascape-lakehouse/warehouse
+---
+apiVersion: pipelines.datascape.dev/v1alpha1
+kind: Pipeline
+metadata:
+  name: lakehouse-pipeline
+  namespace: education
+spec:
+  providerInstanceRef: ProviderInstance/reference-pipeline
+  capabilities: [datascape.dev/pipeline.run]
+  runtime: spark
+---
+apiVersion: tables.datascape.dev/v1alpha1
+kind: Table
+metadata: {name: attendance-bronze, namespace: education}
+spec: {catalogRef: TableCatalog/iceberg-catalog, layer: bronze, format: iceberg}
+---
+apiVersion: tables.datascape.dev/v1alpha1
+kind: Table
+metadata: {name: school-context-bronze, namespace: education}
+spec: {catalogRef: TableCatalog/iceberg-catalog, layer: bronze, format: iceberg}
+---
+apiVersion: tables.datascape.dev/v1alpha1
+kind: Table
+metadata: {name: attendance-silver, namespace: education}
+spec: {catalogRef: TableCatalog/iceberg-catalog, layer: silver, format: iceberg}
+---
+apiVersion: tables.datascape.dev/v1alpha1
+kind: Table
+metadata: {name: school-daily-attendance-summary, namespace: education}
+spec: {catalogRef: TableCatalog/iceberg-catalog, layer: gold, format: iceberg}
+---
+apiVersion: compute.datascape.dev/v1alpha1
+kind: QueryEngine
+metadata: {name: query-engine, namespace: education}
+spec: {providerInstanceRef: ProviderInstance/reference-query, catalogRef: TableCatalog/iceberg-catalog}
+---
+apiVersion: catalogs.datascape.dev/v1alpha1
+kind: MetadataCatalog
+metadata: {name: metadata-catalog, namespace: education}
+spec: {providerInstanceRef: ProviderInstance/reference-metadata, queryEngineRef: QueryEngine/query-engine}
+---
+apiVersion: quality.datascape.dev/v1alpha1
+kind: DataQualityRule
+metadata: {name: valid-attendance-status, namespace: education}
+spec:
+  providerInstanceRef: ProviderInstance/reference-pipeline
+  tableRef: Table/attendance-silver
+  expression: "status_code IN ('P','A','L')"
+  action: quarantine
+---
+apiVersion: lineage.datascape.dev/v1alpha1
+kind: LineageSink
+metadata: {name: lineage-backend, namespace: education}
+spec: {providerInstanceRef: ProviderInstance/reference-lineage, endpoint: "http://lineage-backend:5000/api/v1/lineage"}
+---
+apiVersion: bindings.datascape.dev/v1alpha1
+kind: CDCBinding
+metadata: {name: postgres-attendance-cdc, namespace: education}
+spec:
+  sourceRef: RelationalSource/postgres-attendance
+  streamRef: EventStream/attendance-changes
+  connectorClassRef: ConnectorClass/postgres-logical-replication
+  providerInstanceRef: ProviderInstance/reference-source
+  snapshot: initial
+---
+apiVersion: bindings.datascape.dev/v1alpha1
+kind: BatchIngestBinding
+metadata: {name: sqlite-context-bronze, namespace: education}
+spec:
+  sourceRef: RelationalSource/sqlite-school-context
+  tableRef: Table/school-context-bronze
+  providerInstanceRef: ProviderInstance/reference-pipeline
+---
+apiVersion: bindings.datascape.dev/v1alpha1
+kind: StreamIngestBinding
+metadata: {name: attendance-stream-bronze, namespace: education}
+spec:
+  streamRef: EventStream/attendance-changes
+  tableRef: Table/attendance-bronze
+  providerInstanceRef: ProviderInstance/reference-pipeline
+---
+apiVersion: bindings.datascape.dev/v1alpha1
+kind: TransformBinding
+metadata: {name: attendance-bronze-silver, namespace: education}
+spec:
+  sourceRef: Table/attendance-bronze
+  targetRef: Table/attendance-silver
+  providerInstanceRef: ProviderInstance/reference-pipeline
+---
+apiVersion: bindings.datascape.dev/v1alpha1
+kind: TransformBinding
+metadata: {name: attendance-silver-gold, namespace: education}
+spec:
+  sourceRef: Table/attendance-silver
+  targetRef: Table/school-daily-attendance-summary
+  providerInstanceRef: ProviderInstance/reference-pipeline
+---
+apiVersion: bindings.datascape.dev/v1alpha1
+kind: LineageBinding
+metadata: {name: pipeline-lineage, namespace: education}
+spec:
+  sourceRef: Pipeline/lakehouse-pipeline
+  sinkRef: LineageSink/lineage-backend
+  providerInstanceRef: ProviderInstance/reference-lineage
+---
+apiVersion: bindings.datascape.dev/v1alpha1
+kind: VolumeMountBinding
+metadata: {name: postgres-storage, namespace: education}
+spec: {claimRef: PersistentVolumeClaim/postgres-data, workloadRef: DatabaseInstance/postgres-source, mountPath: /var/lib/postgresql/data}
+---
+apiVersion: bindings.datascape.dev/v1alpha1
+kind: VolumeMountBinding
+metadata: {name: sqlite-storage, namespace: education}
+spec: {claimRef: PersistentVolumeClaim/sqlite-data, workloadRef: DatabaseInstance/sqlite-source, mountPath: /data}
+---
+apiVersion: bindings.datascape.dev/v1alpha1
+kind: VolumeMountBinding
+metadata: {name: stream-storage, namespace: education}
+spec: {claimRef: PersistentVolumeClaim/stream-data, workloadRef: EventStream/attendance-changes, mountPath: /var/lib/redpanda/data}
+---
+apiVersion: bindings.datascape.dev/v1alpha1
+kind: VolumeMountBinding
+metadata: {name: object-storage, namespace: education}
+spec: {claimRef: PersistentVolumeClaim/object-store-data, workloadRef: ObjectStore/lakehouse-store, mountPath: /data}
+---
+apiVersion: bindings.datascape.dev/v1alpha1
+kind: VolumeMountBinding
+metadata: {name: catalog-storage, namespace: education}
+spec: {claimRef: PersistentVolumeClaim/catalog-data, workloadRef: TableCatalog/iceberg-catalog, mountPath: /var/lib/nessie}
+---
+apiVersion: bindings.datascape.dev/v1alpha1
+kind: VolumeMountBinding
+metadata: {name: pipeline-sqlite-storage, namespace: education}
+spec: {claimRef: PersistentVolumeClaim/sqlite-data, workloadRef: Pipeline/lakehouse-pipeline, mountPath: /data/sqlite, readOnly: true}

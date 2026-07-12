@@ -1,0 +1,14 @@
+apiVersion: platform.datascape.dev/v1alpha1
+kind: RuntimeProfile
+metadata:
+  name: reference
+  namespace: education
+spec:
+  target: compose
+  availability:
+    class: local
+    failureDomains: 1
+    minimumReplicas: 1
+  development:
+    enabled: true
+    allowUnpinnedImages: true
