@@ -187,6 +187,11 @@ func service(b *strings.Builder, name string, service ir.TargetServicePlan, heal
 		b.WriteString("\n")
 	}
 	b.WriteString("    logging:\n      driver: json-file\n      options:\n        max-size: \"10m\"\n        max-file: \"3\"\n")
+	if len(service.Entrypoint) > 0 {
+		b.WriteString("    entrypoint: ")
+		b.WriteString(jsonList(service.Entrypoint))
+		b.WriteString("\n")
+	}
 	if len(service.Command) > 0 {
 		b.WriteString("    command: ")
 		b.WriteString(jsonList(service.Command))
@@ -244,7 +249,7 @@ func service(b *strings.Builder, name string, service ir.TargetServicePlan, heal
 		b.WriteString("\n")
 		b.WriteString("      interval: 10s\n")
 		b.WriteString("      timeout: 5s\n")
-		b.WriteString("      retries: 12\n")
+		b.WriteString("      retries: 30\n")
 	}
 	listField(b, "cap_drop", service.CapDrop)
 	listField(b, "security_opt", service.SecurityOpt)
@@ -463,7 +468,7 @@ func cdcServices(plan ir.PlatformPlan, providerServices map[string]ir.TargetServ
 			if instance.Ownership != "managed" && instance.ManagementPolicy != "ManagedConnectors" {
 				continue
 			}
-			endpoint := connectEndpoint(instance, workerName)
+			endpoint := connectEndpoint(instance, workerName, connector.ConnectorName)
 			env := map[string]string{
 				"CONNECTOR_CONFIG": "/" + connector.ConfigPath,
 				"CONNECTOR_NAME":   connector.ConnectorName,
@@ -513,21 +518,21 @@ func registerDependsOn(instance ir.CDCInstancePlan, workerName string) []string 
 	return nil
 }
 
-func connectEndpoint(instance ir.CDCInstancePlan, workerName string) string {
+func connectEndpoint(instance ir.CDCInstancePlan, workerName, connectorName string) string {
 	if instance.Ownership == "managed" {
-		return "http://" + workerName + ":8083/connectors/$${CONNECTOR_NAME}/config"
+		return "http://" + workerName + ":8083/connectors/" + connectorName + "/config"
 	}
 	if instance.Endpoint.URL != "" {
-		return strings.TrimRight(instance.Endpoint.URL, "/") + "/connectors/$${CONNECTOR_NAME}/config"
+		return strings.TrimRight(instance.Endpoint.URL, "/") + "/connectors/" + connectorName + "/config"
 	}
 	if instance.Endpoint.Host != "" {
 		port := instance.Endpoint.Port
 		if port == "" {
 			port = "8083"
 		}
-		return "http://" + instance.Endpoint.Host + ":" + port + "/connectors/$${CONNECTOR_NAME}/config"
+		return "http://" + instance.Endpoint.Host + ":" + port + "/connectors/" + connectorName + "/config"
 	}
-	return "http://external-cdc:8083/connectors/$${CONNECTOR_NAME}/config"
+	return "http://external-cdc:8083/connectors/" + connectorName + "/config"
 }
 
 func streamServiceName(stream domain.ResourceIdentity, providerServices map[string]ir.TargetServicePlan) string {

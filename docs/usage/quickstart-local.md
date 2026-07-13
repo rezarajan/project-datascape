@@ -8,7 +8,7 @@ than an isolated component demonstration.
 - Go 1.26 or later
 - Docker Engine with Docker Compose v2
 - `just`
-- approximately 16 GB of free memory when the governance profile is enabled
+- approximately 16 GB of free memory for the optional governance profile
 
 From a clean checkout, run:
 
@@ -29,8 +29,8 @@ The platform contains:
 - S3-compatible object storage and an Iceberg/Nessie catalog;
 - bronze, silver, quarantine and gold Iceberg datasets;
 - Spark processing, Trino queries and OpenLineage emission to Marquez;
-- an OpenMetadata governance profile (enabled by `reference-up`, and removable
-  from custom launches by omitting `--profile governance`).
+- an optional OpenMetadata governance profile started with
+  `just reference-governance-up`.
 
 Useful commands:
 
@@ -38,6 +38,7 @@ Useful commands:
 just reference-verify
 ./bin/platformctl cdc connectors --platform examples/reference-lakehouse/platform.yaml --profile profiles/reference.yaml
 ./bin/platformctl operations plan --platform examples/reference-lakehouse/platform.yaml --profile profiles/reference.yaml
+just reference-governance-up
 just reference-logs
 just reference-down
 just reference-reset

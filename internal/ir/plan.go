@@ -137,6 +137,7 @@ type TargetServicePlan struct {
 	Name               string            `json:"name"`
 	Capability         string            `json:"capability,omitempty"`
 	Image              string            `json:"image"`
+	Entrypoint         []string          `json:"entrypoint,omitempty"`
 	Command            []string          `json:"command,omitempty"`
 	Ports              []string          `json:"ports,omitempty"`
 	Environment        map[string]string `json:"environment,omitempty"`

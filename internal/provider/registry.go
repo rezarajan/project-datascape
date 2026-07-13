@@ -17,6 +17,7 @@ type Service struct {
 	Name               string            `json:"name"`
 	Capability         string            `json:"capability,omitempty"`
 	Image              string            `json:"image"`
+	Entrypoint         []string          `json:"entrypoint,omitempty"`
 	Command            []string          `json:"command,omitempty"`
 	Ports              []string          `json:"ports,omitempty"`
 	Environment        map[string]string `json:"environment,omitempty"`
@@ -591,6 +592,7 @@ func servicesFromValue(value any) []Service {
 			Name:               stringField(body, "name"),
 			Capability:         stringField(body, "capability"),
 			Image:              stringField(body, "image"),
+			Entrypoint:         orderedStringSlice(body["entrypoint"]),
 			Command:            orderedStringSlice(body["command"]),
 			Ports:              stringSlice(body["ports"]),
 			Environment:        env,

@@ -14,8 +14,9 @@ attendance data and declares PostgreSQL 18, mounted SQLite, Debezium Kafka
 Connect, Redpanda,
 S3-compatible storage, an Iceberg/Nessie catalog, Spark transformations, Trino,
 OpenLineage/Marquez, data-quality quarantine and an OpenMetadata governance
-profile. The default `reference-up` workflow enables governance; operators can
-omit that Compose profile for a smaller custom launch.
+profile. The default `reference-up` workflow starts the core lakehouse resources
+required for CDC, transformation, query, lineage and verification. Operators can
+start the governance profile explicitly with `reference-governance-up`.
 
 The expected flow is PostgreSQL CDC to Redpanda and bronze storage, SQLite batch
 ingestion to bronze, bronze-to-silver validation, silver-to-gold aggregation,

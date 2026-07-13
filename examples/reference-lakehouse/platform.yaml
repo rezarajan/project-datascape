@@ -77,7 +77,6 @@ spec:
       restart: unless-stopped
       command: [python, -c, "import sqlite3,time; db=sqlite3.connect('/data/supplementary.db'); db.execute('create table if not exists school_context(school_id text primary key, district text, school_type text)'); db.executemany('insert or ignore into school_context values(?,?,?)',[('SCH-001','North','Primary'),('SCH-002','South','Secondary')]); db.commit(); time.sleep(10**9)"]
       healthcheck: [CMD-SHELL, "test -s /data/supplementary.db"]
-      capDrop: [ALL]
       securityOpt: ["no-new-privileges:true"]
       memory: 256m
       pidsLimit: 64
@@ -178,11 +177,15 @@ spec:
       pidsLimit: 256
     - name: object-store-bootstrap
       image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
-      command: [sh, -c, "mc alias set local http://lakehouse-store:9000 $${EDUCATION_OBJECT_STORE_CREDENTIALS_ACCESSKEY} $${EDUCATION_OBJECT_STORE_CREDENTIALS_SECRETKEY} && mc mb --ignore-existing local/datascape-lakehouse"]
+      entrypoint: [sh, -c]
+      command: ["mc alias set local http://lakehouse-store:9000 $${EDUCATION_OBJECT_STORE_CREDENTIALS_ACCESSKEY} $${EDUCATION_OBJECT_STORE_CREDENTIALS_SECRETKEY} && mc mb --ignore-existing local/datascape-lakehouse"]
       dependsOn: [lakehouse-store]
       environment:
+        HOME: /tmp
+        MC_CONFIG_DIR: /tmp/.mc
         EDUCATION_OBJECT_STORE_CREDENTIALS_ACCESSKEY: ${EDUCATION_OBJECT_STORE_CREDENTIALS_ACCESSKEY:-datascape}
         EDUCATION_OBJECT_STORE_CREDENTIALS_SECRETKEY: "${EDUCATION_OBJECT_STORE_CREDENTIALS_SECRETKEY:?set by reference-up}"
+      tmpfs: [/tmp]
       capDrop: [ALL]
       securityOpt: ["no-new-privileges:true"]
       memory: 128m
@@ -213,13 +216,24 @@ spec:
     - name: iceberg-catalog
       image: ghcr.io/projectnessie/nessie:0.108.1
       restart: unless-stopped
+      user: "0"
       ports: [127.0.0.1:19120:19120]
       environment:
         QUARKUS_HTTP_PORT: "19120"
+        AWS_REGION: us-east-1
+        AWS_DEFAULT_REGION: us-east-1
+        DATASCAPE_LAKEHOUSE_S3_DEFAULT_NAME: ${EDUCATION_OBJECT_STORE_CREDENTIALS_ACCESSKEY:-datascape}
+        DATASCAPE_LAKEHOUSE_S3_DEFAULT_SECRET: ${EDUCATION_OBJECT_STORE_CREDENTIALS_SECRETKEY:?set by reference-up}
         NESSIE_VERSION_STORE_TYPE: ROCKSDB
         NESSIE_VERSION_STORE_PERSIST_ROCKS_DATABASE_PATH: /var/lib/nessie
-      healthcheck: [CMD-SHELL, "wget -qO- http://localhost:19120/q/health/ready"]
-      capDrop: [ALL]
+        NESSIE_CATALOG_DEFAULT_WAREHOUSE: datascape
+        NESSIE_CATALOG_WAREHOUSES_DATASCAPE_LOCATION: s3://datascape-lakehouse/warehouse
+        NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_ENDPOINT: http://lakehouse-store:9000
+        NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_PATH_STYLE_ACCESS: "true"
+        NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_REGION: us-east-1
+        NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_AUTH_TYPE: STATIC
+        NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_ACCESS_KEY: urn:nessie-secret:quarkus:datascape.lakehouse.s3.default
+      healthcheck: [CMD-SHELL, "curl -fsS http://localhost:19120/api/v2/config"]
       securityOpt: ["no-new-privileges:true"]
       memory: 1g
       pidsLimit: 256
@@ -250,11 +264,14 @@ spec:
     - name: lakehouse-pipeline
       image: tabulario/spark-iceberg:3.5.5_1.8.1
       restart: unless-stopped
-      command: [sleep, infinity]
+      entrypoint: [sleep]
+      command: [infinity]
       dependsOn: [postgres-source, sqlite-source, attendance-changes, cdc-register-education-shared-operational-cdc-postgres-attendance-cdc, lakehouse-store, object-store-bootstrap, iceberg-catalog, lineage-backend]
       dependsOnCompleted: [cdc-register-education-shared-operational-cdc-postgres-attendance-cdc, object-store-bootstrap]
       volumes: ["./jobs:/opt/datascape/jobs:ro"]
       environment:
+        AWS_REGION: us-east-1
+        AWS_DEFAULT_REGION: us-east-1
         EDUCATION_POSTGRES_CREDENTIALS_USERNAME: ${EDUCATION_POSTGRES_CREDENTIALS_USERNAME:-datascape}
         EDUCATION_POSTGRES_CREDENTIALS_PASSWORD: ${EDUCATION_POSTGRES_CREDENTIALS_PASSWORD:?set by reference-up}
         EDUCATION_OBJECT_STORE_CREDENTIALS_ACCESSKEY: ${EDUCATION_OBJECT_STORE_CREDENTIALS_ACCESSKEY:-datascape}
@@ -293,6 +310,9 @@ spec:
       ports: [127.0.0.1:18080:8080]
       dependsOn: [iceberg-catalog, lakehouse-store]
       volumes: ["./jobs/trino:/etc/trino/catalog:ro"]
+      environment:
+        EDUCATION_OBJECT_STORE_CREDENTIALS_ACCESSKEY: ${EDUCATION_OBJECT_STORE_CREDENTIALS_ACCESSKEY:-datascape}
+        EDUCATION_OBJECT_STORE_CREDENTIALS_SECRETKEY: "${EDUCATION_OBJECT_STORE_CREDENTIALS_SECRETKEY:?set by reference-up}"
       healthcheck: [CMD-SHELL, "curl -fsS http://localhost:8080/v1/info"]
       capDrop: [ALL]
       securityOpt: ["no-new-privileges:true"]
@@ -329,7 +349,7 @@ spec:
         POSTGRES_DB: marquez
         POSTGRES_USER: ${EDUCATION_LINEAGE_DB_CREDENTIALS_USERNAME:-marquez}
         POSTGRES_PASSWORD: "${EDUCATION_LINEAGE_DB_CREDENTIALS_PASSWORD:?set by reference-up}"
-      volumes: ["lineage-db-data:/var/lib/postgresql/data"]
+      volumes: ["lineage-db-data:/var/lib/postgresql"]
       healthcheck: [CMD-SHELL, "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       securityOpt: ["no-new-privileges:true"]
       memory: 1g
@@ -339,7 +359,9 @@ spec:
       restart: unless-stopped
       ports: [127.0.0.1:15000:5000, 127.0.0.1:15001:5001]
       dependsOn: [lineage-db]
+      volumes: ["./jobs/marquez/marquez.yml:/etc/marquez/marquez.yml:ro"]
       environment:
+        MARQUEZ_CONFIG: /etc/marquez/marquez.yml
         MARQUEZ_PORT: "5000"
         MARQUEZ_ADMIN_PORT: "5001"
         POSTGRES_HOST: lineage-db
@@ -384,7 +406,7 @@ spec:
         POSTGRES_DB: openmetadata_db
         POSTGRES_USER: ${EDUCATION_METADATA_DB_CREDENTIALS_USERNAME:-openmetadata_user}
         POSTGRES_PASSWORD: "${EDUCATION_METADATA_DB_CREDENTIALS_PASSWORD:?set by reference-up}"
-      volumes: ["metadata-db-data:/var/lib/postgresql/data"]
+      volumes: ["metadata-db-data:/var/lib/postgresql"]
       healthcheck: [CMD-SHELL, "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       securityOpt: ["no-new-privileges:true"]
       memory: 1g
@@ -606,6 +628,8 @@ spec:
       topic.prefix: stream.topicPrefix
       table.include.list: tables.includeList
       snapshot.mode: snapshot.mode
+      publication.name: connector.publicationName
+      slot.name: connector.slotName
       plugin.name: plugin.name
   parameters: {}
 ---
@@ -900,7 +924,7 @@ spec:
 apiVersion: bindings.datascape.dev/v1alpha1
 kind: VolumeMountBinding
 metadata: {name: postgres-storage, namespace: education}
-spec: {claimRef: PersistentVolumeClaim/postgres-data, workloadRef: DatabaseInstance/postgres-source, mountPath: /var/lib/postgresql/data}
+spec: {claimRef: PersistentVolumeClaim/postgres-data, workloadRef: DatabaseInstance/postgres-source, mountPath: /var/lib/postgresql}
 ---
 apiVersion: bindings.datascape.dev/v1alpha1
 kind: VolumeMountBinding

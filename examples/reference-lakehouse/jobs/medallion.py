@@ -13,12 +13,17 @@ def spark_session() -> SparkSession:
     return (
         SparkSession.builder.appName("datascape-reference-medallion")
         .config("spark.sql.catalog.nessie", "org.apache.iceberg.spark.SparkCatalog")
-        .config("spark.sql.catalog.nessie.catalog-impl", "org.apache.iceberg.nessie.NessieCatalog")
-        .config("spark.sql.catalog.nessie.uri", "http://iceberg-catalog:19120/api/v2")
+        .config("spark.sql.catalog.nessie.type", "rest")
+        .config("spark.sql.catalog.nessie.uri", "http://iceberg-catalog:19120/iceberg")
+        .config("spark.sql.catalog.nessie.warehouse", "datascape")
         .config("spark.sql.catalog.nessie.ref", "main")
-        .config("spark.sql.catalog.nessie.warehouse", "s3://datascape-lakehouse/warehouse")
+        .config("spark.sql.catalog.nessie.s3.endpoint", "http://lakehouse-store:9000")
+        .config("spark.sql.catalog.nessie.s3.path-style-access", "true")
+        .config("spark.sql.catalog.nessie.client.region", "us-east-1")
+        .config("spark.sql.defaultCatalog", "nessie")
         .config("spark.hadoop.fs.s3a.endpoint", "http://lakehouse-store:9000")
         .config("spark.hadoop.fs.s3a.path.style.access", "true")
+        .config("spark.hadoop.fs.s3a.endpoint.region", "us-east-1")
         .config("spark.hadoop.fs.s3a.access.key", os.environ["EDUCATION_OBJECT_STORE_CREDENTIALS_ACCESSKEY"])
         .config("spark.hadoop.fs.s3a.secret.key", os.environ["EDUCATION_OBJECT_STORE_CREDENTIALS_SECRETKEY"])
         .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
@@ -60,7 +65,7 @@ def main() -> None:
     run_id = str(uuid.uuid4())
     emit_lineage("START", run_id)
     spark = spark_session()
-    spark.sql("CREATE NAMESPACE IF NOT EXISTS nessie.education")
+    spark.sql("CREATE NAMESPACE IF NOT EXISTS education")
 
     after_schema = T.StructType(
         [
@@ -86,17 +91,17 @@ def main() -> None:
         .select("event.payload.after.*")
         .filter(F.col("attendance_id").isNotNull())
     )
-    attendance.writeTo("nessie.education.attendance_bronze").using("iceberg").createOrReplace()
+    attendance.writeTo("education.attendance_bronze").using("iceberg").createOrReplace()
 
     with sqlite3.connect("/data/sqlite/supplementary.db") as database:
         rows = database.execute("SELECT school_id, district, school_type FROM school_context ORDER BY school_id").fetchall()
     context = spark.createDataFrame(rows, ["school_id", "district", "school_type"])
-    context.writeTo("nessie.education.school_context_bronze").using("iceberg").createOrReplace()
+    context.writeTo("education.school_context_bronze").using("iceberg").createOrReplace()
 
     valid = attendance.filter(F.col("status_code").isin("P", "A", "L"))
-    valid.writeTo("nessie.education.attendance_silver").using("iceberg").createOrReplace()
+    valid.writeTo("education.attendance_silver").using("iceberg").createOrReplace()
     invalid = attendance.filter(~F.col("status_code").isin("P", "A", "L"))
-    invalid.writeTo("nessie.education.attendance_quarantine").using("iceberg").createOrReplace()
+    invalid.writeTo("education.attendance_quarantine").using("iceberg").createOrReplace()
 
     gold = (
         valid.groupBy("school_id", "record_date")
@@ -107,7 +112,7 @@ def main() -> None:
         )
         .withColumn("attendance_rate", F.round(F.col("present_count") / F.col("submitted_count"), 4))
     )
-    gold.writeTo("nessie.education.school_daily_attendance_summary").using("iceberg").createOrReplace()
+    gold.writeTo("education.school_daily_attendance_summary").using("iceberg").createOrReplace()
     spark.stop()
     emit_lineage("COMPLETE", run_id)
 

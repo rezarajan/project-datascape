@@ -757,6 +757,7 @@ func servicePlan(service provider.Service) ir.TargetServicePlan {
 	return ir.TargetServicePlan{
 		Name: service.Name, Capability: service.Capability, Image: service.Image,
 		Command: append([]string{}, service.Command...), Ports: append([]string{}, service.Ports...),
+		Entrypoint:  append([]string{}, service.Entrypoint...),
 		Environment: cloneStringMap(service.Environment), Volumes: append([]string{}, service.Volumes...),
 		DependsOn: append([]string{}, service.DependsOn...), Healthcheck: append([]string{}, service.Healthcheck...),
 		DependsOnCompleted: append([]string{}, service.DependsOnCompleted...),

@@ -328,18 +328,20 @@ func cdcProviderConfiguration(connectorClassBody, bindingBody map[string]any, co
 		}
 	}
 	normalized := map[string]any{
-		"connector.class":         stringDefault(stringValue(connectorClassBody["driver"]), "io.debezium.connector.postgresql.PostgresConnector"),
-		"connection.host":         connection.Endpoint.Host,
-		"connection.port":         connection.Endpoint.Port,
-		"database.name":           connection.Database,
-		"credentials.usernameEnv": envReference(connection.CredentialEnv["username"]),
-		"credentials.passwordEnv": envReference(connection.CredentialEnv["password"]),
-		"tables.includeList":      strings.Join(tables, ","),
-		"snapshot.mode":           snapshot,
-		"stream.topic":            topic,
-		"stream.topicPrefix":      sanitizeName(connectorName),
-		"connector.name":          connectorName,
-		"plugin.name":             "pgoutput",
+		"connector.class":           stringDefault(stringValue(connectorClassBody["driver"]), "io.debezium.connector.postgresql.PostgresConnector"),
+		"connection.host":           connection.Endpoint.Host,
+		"connection.port":           connection.Endpoint.Port,
+		"database.name":             connection.Database,
+		"credentials.usernameEnv":   envReference(connection.CredentialEnv["username"]),
+		"credentials.passwordEnv":   envReference(connection.CredentialEnv["password"]),
+		"tables.includeList":        strings.Join(tables, ","),
+		"snapshot.mode":             snapshot,
+		"stream.topic":              topic,
+		"stream.topicPrefix":        sanitizeName(connectorName),
+		"connector.name":            connectorName,
+		"connector.publicationName": postgresIdentifier(connectorName + "_publication"),
+		"connector.slotName":        postgresIdentifier(connectorName + "_slot"),
+		"plugin.name":               "pgoutput",
 	}
 	config := mergeAnyMaps(defaults, map[string]any{})
 	for nativeKey, normalizedKey := range mapping {
@@ -365,8 +367,39 @@ func defaultCDCConfigMapping() map[string]string {
 		"topic.prefix":       "stream.topicPrefix",
 		"table.include.list": "tables.includeList",
 		"snapshot.mode":      "snapshot.mode",
+		"publication.name":   "connector.publicationName",
+		"slot.name":          "connector.slotName",
 		"plugin.name":        "plugin.name",
 	}
+}
+
+func postgresIdentifier(value string) string {
+	value = strings.ToLower(value)
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			b.WriteRune(r)
+			lastUnderscore = false
+			continue
+		}
+		if !lastUnderscore {
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	identifier := strings.Trim(b.String(), "_")
+	if identifier == "" {
+		return "datascape_cdc"
+	}
+	if identifier[0] >= '0' && identifier[0] <= '9' {
+		identifier = "cdc_" + identifier
+	}
+	if len(identifier) > 63 {
+		identifier = identifier[:63]
+		identifier = strings.TrimRight(identifier, "_")
+	}
+	return identifier
 }
 
 func defaultCDCTransformConfig(topic string) map[string]any {

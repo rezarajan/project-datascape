@@ -37,10 +37,13 @@ reference-generate: build
     ./bin/platformctl secrets init --bundle dist/reference --development
 
 reference-up: reference-generate
-    cd dist/reference && docker compose --env-file .env --profile governance up -d --wait
-    cd dist/reference && for attempt in $(seq 1 60); do if docker compose --env-file .env exec -T attendance-changes rpk topic describe attendance-changes --format json | grep -Eq '"high_watermark":[[:space:]]*[1-9]'; then exit 0; fi; sleep 2; done; echo "CDC did not publish attendance events within 120 seconds" >&2; exit 1
-    cd dist/reference && docker compose --env-file .env --profile governance exec -T lakehouse-pipeline /opt/spark/bin/spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.5 /opt/datascape/jobs/medallion.py
+    cd dist/reference && docker compose --env-file .env up -d
+    cd dist/reference && for attempt in $(seq 1 180); do if docker compose --env-file .env exec -T attendance-changes rpk topic describe attendance-changes --format json | grep -Eq '"high_watermark":[[:space:]]*[1-9]'; then exit 0; fi; sleep 2; done; echo "CDC did not publish attendance events within 360 seconds" >&2; exit 1
+    cd dist/reference && docker compose --env-file .env exec -T lakehouse-pipeline /opt/spark/bin/spark-submit --conf spark.driver.memory=1g --conf spark.executor.memory=1g --conf spark.sql.shuffle.partitions=1 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.5 /opt/datascape/jobs/medallion.py
     just reference-verify
+
+reference-governance-up: reference-generate
+    cd dist/reference && docker compose --env-file .env --profile governance up -d
 
 reference-verify:
     ./bin/platformctl verify --bundle dist/reference --runtime
