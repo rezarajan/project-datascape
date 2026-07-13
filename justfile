@@ -45,7 +45,8 @@ reference-up: reference-generate
     just reference-verify
 
 reference-governance-up: reference-generate
-    cd dist/reference && docker compose --env-file .env --profile governance up -d
+    cd dist/reference && docker compose --env-file .env --profile governance up -d --scale metadata-bootstrap=0
+    cd dist/reference && docker compose --env-file .env --profile governance up --no-deps metadata-bootstrap
 
 reference-verify:
     ./bin/platformctl verify --bundle dist/reference --runtime

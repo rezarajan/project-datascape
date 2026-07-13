@@ -38,7 +38,7 @@ def spark_session(stage: str) -> SparkSession:
 
 
 def iceberg_dataset(name: str) -> dict:
-    return {"namespace": WAREHOUSE_NAMESPACE, "name": f"education.{name}"}
+    return {"namespace": WAREHOUSE_NAMESPACE, "name": f"datascape.education.{name}"}
 
 
 def emit_lineage(event_type: str, job_name: str, run_id: str, inputs: list[dict], outputs: list[dict]) -> None:
@@ -148,7 +148,7 @@ STAGES = {
     "bronze": (
         [
             {"namespace": "postgresql://postgres-source:5432", "name": "attendance.public.student_attendance"},
-            {"namespace": "file:///data/sqlite", "name": "supplementary.db.school_context"},
+            {"namespace": "file:///data/sqlite", "name": "supplementary.main.school_context"},
         ],
         [iceberg_dataset("attendance_bronze"), iceberg_dataset("school_context_bronze")],
         run_bronze,

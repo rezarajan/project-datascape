@@ -3,7 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -568,11 +568,8 @@ func cmdSecrets(ctx context.Context, args []string) error {
 		}
 		value := "datascape"
 		if !strings.Contains(strings.ToLower(key), "username") && !strings.HasSuffix(strings.ToLower(key), "user") {
-			secret := make([]byte, 24)
-			if _, err := rand.Read(secret); err != nil {
-				return err
-			}
-			value = base64.RawURLEncoding.EncodeToString(secret)
+			secret := sha256.Sum256([]byte("datascape-development-secret:" + key))
+			value = base64.RawURLEncoding.EncodeToString(secret[:24])
 		}
 		lines[index] = key + "=" + value
 	}

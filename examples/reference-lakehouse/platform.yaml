@@ -479,6 +479,21 @@ spec:
       securityOpt: ["no-new-privileges:true"]
       memory: 3g
       pidsLimit: 512
+    - name: metadata-bootstrap
+      image: python:3.13-alpine
+      profiles: [governance]
+      command: [python, /opt/datascape/openmetadata/bootstrap.py, /opt/datascape/openmetadata/bootstrap.json]
+      dependsOn: [metadata-catalog]
+      dependsOnCompleted: [metadata-migrate]
+      volumes:
+        - ./jobs/openmetadata:/opt/datascape/openmetadata:ro
+      environment:
+        OPENMETADATA_URL: http://metadata-catalog:8585/api/v1
+        OPENMETADATA_USERNAME: admin@open-metadata.org
+      capDrop: [ALL]
+      securityOpt: ["no-new-privileges:true"]
+      memory: 256m
+      pidsLimit: 128
 ---
 apiVersion: platform.datascape.dev/v1alpha1
 kind: ProviderInstance

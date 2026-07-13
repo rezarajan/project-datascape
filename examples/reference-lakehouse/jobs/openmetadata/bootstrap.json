@@ -1,0 +1,241 @@
+{
+  "databaseServices": [
+    {
+      "name": "reference-postgres",
+      "displayName": "Reference PostgreSQL",
+      "serviceType": "Postgres",
+      "description": "Managed PostgreSQL operational source for the reference lakehouse."
+    },
+    {
+      "name": "reference-sqlite",
+      "displayName": "Reference SQLite Context",
+      "serviceType": "SQLite",
+      "description": "File-backed SQLite context source for reference batch ingestion."
+    },
+    {
+      "name": "reference-lakehouse",
+      "displayName": "Reference Iceberg Lakehouse",
+      "serviceType": "Datalake",
+      "description": "Iceberg tables in the reference object-store backed lakehouse."
+    }
+  ],
+  "pipelineServices": [
+    {
+      "name": "reference-openlineage",
+      "displayName": "Reference OpenLineage",
+      "serviceType": "OpenLineage",
+      "description": "OpenLineage service for the reference medallion jobs.",
+      "connection": {
+        "config": {
+          "type": "OpenLineage",
+          "brokerConfig": {
+            "brokersUrl": "attendance-changes:9092",
+            "topicName": "openlineage-events",
+            "consumerGroupName": "openmetadata-reference",
+            "consumerOffsets": "earliest",
+            "securityProtocol": "PLAINTEXT"
+          },
+          "namespaceToServiceMapping": {
+            "postgresql://postgres-source:5432": "reference-postgres",
+            "file:///data/sqlite": "reference-sqlite",
+            "s3://datascape-lakehouse/warehouse": "reference-lakehouse"
+          }
+        }
+      }
+    }
+  ],
+  "databases": [
+    {
+      "name": "attendance",
+      "service": "reference-postgres",
+      "description": "Operational attendance source database."
+    },
+    {
+      "name": "supplementary",
+      "service": "reference-sqlite",
+      "description": "Supplementary school context source database."
+    },
+    {
+      "name": "datascape",
+      "service": "reference-lakehouse",
+      "description": "Reference Iceberg warehouse database."
+    }
+  ],
+  "schemas": [
+    {
+      "name": "public",
+      "database": "reference-postgres.attendance"
+    },
+    {
+      "name": "main",
+      "database": "reference-sqlite.supplementary"
+    },
+    {
+      "name": "education",
+      "database": "reference-lakehouse.datascape"
+    }
+  ],
+  "tables": [
+    {
+      "name": "student_attendance",
+      "displayName": "Student Attendance",
+      "databaseSchema": "reference-postgres.attendance.public",
+      "description": "Operational student attendance submissions captured through CDC.",
+      "columns": [
+        {"name": "attendance_id", "dataType": "BIGINT"},
+        {"name": "school_id", "dataType": "STRING"},
+        {"name": "student_id", "dataType": "STRING"},
+        {"name": "record_date", "dataType": "INT"},
+        {"name": "status_code", "dataType": "STRING"},
+        {"name": "submitted_at", "dataType": "BIGINT"}
+      ]
+    },
+    {
+      "name": "school_context",
+      "displayName": "School Context",
+      "databaseSchema": "reference-sqlite.supplementary.main",
+      "description": "Supplementary school district and school type context.",
+      "columns": [
+        {"name": "school_id", "dataType": "STRING"},
+        {"name": "district", "dataType": "STRING"},
+        {"name": "school_type", "dataType": "STRING"}
+      ]
+    },
+    {
+      "name": "attendance_bronze",
+      "displayName": "Attendance Bronze",
+      "databaseSchema": "reference-lakehouse.datascape.education",
+      "description": "Raw attendance events landed from the CDC stream.",
+      "fileFormat": "parquet",
+      "columns": [
+        {"name": "attendance_id", "dataType": "BIGINT"},
+        {"name": "school_id", "dataType": "STRING"},
+        {"name": "student_id", "dataType": "STRING"},
+        {"name": "record_date", "dataType": "INT"},
+        {"name": "status_code", "dataType": "STRING"},
+        {"name": "submitted_at", "dataType": "BIGINT"}
+      ]
+    },
+    {
+      "name": "school_context_bronze",
+      "displayName": "School Context Bronze",
+      "databaseSchema": "reference-lakehouse.datascape.education",
+      "description": "School context copied into the bronze lakehouse layer.",
+      "fileFormat": "parquet",
+      "columns": [
+        {"name": "school_id", "dataType": "STRING"},
+        {"name": "district", "dataType": "STRING"},
+        {"name": "school_type", "dataType": "STRING"}
+      ]
+    },
+    {
+      "name": "attendance_silver",
+      "displayName": "Attendance Silver",
+      "databaseSchema": "reference-lakehouse.datascape.education",
+      "description": "Validated attendance events.",
+      "fileFormat": "parquet",
+      "columns": [
+        {"name": "attendance_id", "dataType": "BIGINT"},
+        {"name": "school_id", "dataType": "STRING"},
+        {"name": "student_id", "dataType": "STRING"},
+        {"name": "record_date", "dataType": "INT"},
+        {"name": "status_code", "dataType": "STRING"},
+        {"name": "submitted_at", "dataType": "BIGINT"}
+      ]
+    },
+    {
+      "name": "attendance_quarantine",
+      "displayName": "Attendance Quarantine",
+      "databaseSchema": "reference-lakehouse.datascape.education",
+      "description": "Rejected attendance rows that fail reference quality rules.",
+      "fileFormat": "parquet",
+      "columns": [
+        {"name": "attendance_id", "dataType": "BIGINT"},
+        {"name": "school_id", "dataType": "STRING"},
+        {"name": "student_id", "dataType": "STRING"},
+        {"name": "record_date", "dataType": "INT"},
+        {"name": "status_code", "dataType": "STRING"},
+        {"name": "submitted_at", "dataType": "BIGINT"}
+      ]
+    },
+    {
+      "name": "school_daily_attendance_summary",
+      "displayName": "School Daily Attendance Summary",
+      "databaseSchema": "reference-lakehouse.datascape.education",
+      "description": "Gold Iceberg attendance summary by school and date.",
+      "fileFormat": "parquet",
+      "columns": [
+        {"name": "school_id", "dataType": "STRING"},
+        {"name": "district", "dataType": "STRING"},
+        {"name": "school_type", "dataType": "STRING"},
+        {"name": "record_date", "dataType": "INT"},
+        {"name": "submitted_count", "dataType": "INT"},
+        {"name": "present_count", "dataType": "INT"},
+        {"name": "absent_count", "dataType": "INT"},
+        {"name": "attendance_rate", "dataType": "DOUBLE"}
+      ]
+    }
+  ],
+  "pipelines": [
+    {
+      "name": "attendance-bronze",
+      "displayName": "Attendance Bronze",
+      "service": "reference-openlineage",
+      "description": "Reads operational sources and writes bronze Iceberg tables."
+    },
+    {
+      "name": "attendance-silver",
+      "displayName": "Attendance Silver",
+      "service": "reference-openlineage",
+      "description": "Validates bronze attendance rows into silver and quarantine outputs."
+    },
+    {
+      "name": "attendance-gold",
+      "displayName": "Attendance Gold",
+      "service": "reference-openlineage",
+      "description": "Publishes the structured gold Iceberg attendance summary."
+    }
+  ],
+  "lineage": [
+    {
+      "from": "table:reference-postgres.attendance.public.student_attendance",
+      "to": "pipeline:reference-openlineage.attendance-bronze"
+    },
+    {
+      "from": "table:reference-sqlite.supplementary.main.school_context",
+      "to": "pipeline:reference-openlineage.attendance-bronze"
+    },
+    {
+      "from": "pipeline:reference-openlineage.attendance-bronze",
+      "to": "table:reference-lakehouse.datascape.education.attendance_bronze"
+    },
+    {
+      "from": "pipeline:reference-openlineage.attendance-bronze",
+      "to": "table:reference-lakehouse.datascape.education.school_context_bronze"
+    },
+    {
+      "from": "table:reference-lakehouse.datascape.education.attendance_bronze",
+      "to": "pipeline:reference-openlineage.attendance-silver"
+    },
+    {
+      "from": "pipeline:reference-openlineage.attendance-silver",
+      "to": "table:reference-lakehouse.datascape.education.attendance_silver"
+    },
+    {
+      "from": "pipeline:reference-openlineage.attendance-silver",
+      "to": "table:reference-lakehouse.datascape.education.attendance_quarantine"
+    },
+    {
+      "from": "table:reference-lakehouse.datascape.education.attendance_silver",
+      "to": "pipeline:reference-openlineage.attendance-gold"
+    },
+    {
+      "from": "table:reference-lakehouse.datascape.education.school_context_bronze",
+      "to": "pipeline:reference-openlineage.attendance-gold"
+    },
+    {
+      "from": "pipeline:reference-openlineage.attendance-gold",
+      "to": "table:reference-lakehouse.datascape.education.school_daily_attendance_summary"
+    }
+  ]
+}

@@ -32,6 +32,7 @@ func TestDevelopmentSecretsCreatedWithoutPrintingValues(t *testing.T) {
 	if strings.Contains(string(content), "change-me-local") || !strings.Contains(string(content), "APP_USERNAME=datascape") {
 		t.Fatalf("unexpected development secret file: %s", content)
 	}
+	first := string(content)
 	if err := cmdSecrets(context.Background(), []string{"init", "--bundle", bundle, "--development"}); err == nil {
 		t.Fatal("expected overwrite protection")
 	}
@@ -44,6 +45,13 @@ func TestDevelopmentSecretsCreatedWithoutPrintingValues(t *testing.T) {
 	info, err = os.Stat(filepath.Join(bundle, ".env"))
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("forced replacement must restore mode 0600: info=%v err=%v", info, err)
+	}
+	content, err = os.ReadFile(filepath.Join(bundle, ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != first {
+		t.Fatalf("development secret generation must be stable across regeneration\nfirst: %s\nsecond: %s", first, content)
 	}
 }
 
