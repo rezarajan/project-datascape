@@ -39,7 +39,9 @@ reference-generate: build
 reference-up: reference-generate
     cd dist/reference && docker compose --env-file .env up -d
     cd dist/reference && for attempt in $(seq 1 180); do if docker compose --env-file .env exec -T attendance-changes rpk topic describe attendance-changes --format json | grep -Eq '"high_watermark":[[:space:]]*[1-9]'; then exit 0; fi; sleep 2; done; echo "CDC did not publish attendance events within 360 seconds" >&2; exit 1
-    cd dist/reference && docker compose --env-file .env exec -T lakehouse-pipeline /opt/spark/bin/spark-submit --conf spark.driver.memory=1g --conf spark.executor.memory=1g --conf spark.sql.shuffle.partitions=1 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.5 /opt/datascape/jobs/medallion.py
+    cd dist/reference && docker compose --env-file .env exec -T lakehouse-pipeline /opt/spark/bin/spark-submit --conf spark.driver.memory=1g --conf spark.executor.memory=1g --conf spark.sql.shuffle.partitions=1 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.5 /opt/datascape/jobs/medallion.py bronze
+    cd dist/reference && docker compose --env-file .env exec -T lakehouse-pipeline /opt/spark/bin/spark-submit --conf spark.driver.memory=1g --conf spark.executor.memory=1g --conf spark.sql.shuffle.partitions=1 /opt/datascape/jobs/medallion.py silver
+    cd dist/reference && docker compose --env-file .env exec -T lakehouse-pipeline /opt/spark/bin/spark-submit --conf spark.driver.memory=1g --conf spark.executor.memory=1g --conf spark.sql.shuffle.partitions=1 /opt/datascape/jobs/medallion.py gold
     just reference-verify
 
 reference-governance-up: reference-generate

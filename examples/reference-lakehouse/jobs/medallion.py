@@ -1,17 +1,22 @@
-"""Deterministic reference medallion job for synthetic attendance data."""
+"""Deterministic staged medallion jobs for synthetic attendance data."""
 
-import os
 import json
+import os
 import sqlite3
-import uuid
+import sys
 import urllib.request
+import uuid
 from datetime import datetime, timezone
+
 from pyspark.sql import SparkSession, functions as F, types as T
 
 
-def spark_session() -> SparkSession:
+WAREHOUSE_NAMESPACE = "s3://datascape-lakehouse/warehouse"
+
+
+def spark_session(stage: str) -> SparkSession:
     return (
-        SparkSession.builder.appName("datascape-reference-medallion")
+        SparkSession.builder.appName(f"datascape-reference-{stage}")
         .config("spark.sql.catalog.nessie", "org.apache.iceberg.spark.SparkCatalog")
         .config("spark.sql.catalog.nessie.type", "rest")
         .config("spark.sql.catalog.nessie.uri", "http://iceberg-catalog:19120/iceberg")
@@ -32,23 +37,20 @@ def spark_session() -> SparkSession:
     )
 
 
-def emit_lineage(event_type: str, run_id: str) -> None:
+def iceberg_dataset(name: str) -> dict:
+    return {"namespace": WAREHOUSE_NAMESPACE, "name": f"education.{name}"}
+
+
+def emit_lineage(event_type: str, job_name: str, run_id: str, inputs: list[dict], outputs: list[dict]) -> None:
     event = {
         "eventType": event_type,
         "eventTime": datetime.now(timezone.utc).isoformat(),
         "run": {"runId": run_id},
-        "job": {"namespace": "datascape-reference", "name": "medallion-attendance"},
+        "job": {"namespace": "datascape-reference", "name": job_name},
         "producer": "https://github.com/rezarajan/project-datascape",
         "schemaURL": "https://openlineage.io/spec/1-0-5/OpenLineage.json",
-        "inputs": [
-            {"namespace": "postgresql://postgres-source:5432", "name": "attendance.public.student_attendance"},
-            {"namespace": "file:///data/sqlite", "name": "supplementary.db.school_context"},
-        ],
-        "outputs": [
-            {"namespace": "s3://datascape-lakehouse/warehouse", "name": "education.attendance_bronze"},
-            {"namespace": "s3://datascape-lakehouse/warehouse", "name": "education.attendance_silver"},
-            {"namespace": "s3://datascape-lakehouse/warehouse", "name": "education.school_daily_attendance_summary"},
-        ],
+        "inputs": inputs,
+        "outputs": outputs,
     }
     request = urllib.request.Request(
         "http://lineage-backend:5000/api/v1/lineage",
@@ -61,12 +63,19 @@ def emit_lineage(event_type: str, run_id: str) -> None:
             raise RuntimeError(f"lineage backend returned {response.status}")
 
 
-def main() -> None:
+def run_stage(stage: str, inputs: list[dict], outputs: list[dict], fn) -> None:
     run_id = str(uuid.uuid4())
-    emit_lineage("START", run_id)
-    spark = spark_session()
-    spark.sql("CREATE NAMESPACE IF NOT EXISTS education")
+    emit_lineage("START", f"attendance-{stage}", run_id, inputs, outputs)
+    spark = spark_session(stage)
+    try:
+        spark.sql("CREATE NAMESPACE IF NOT EXISTS education")
+        fn(spark)
+    finally:
+        spark.stop()
+    emit_lineage("COMPLETE", f"attendance-{stage}", run_id, inputs, outputs)
 
+
+def run_bronze(spark: SparkSession) -> None:
     after_schema = T.StructType(
         [
             T.StructField("attendance_id", T.LongType()),
@@ -94,15 +103,24 @@ def main() -> None:
     attendance.writeTo("education.attendance_bronze").using("iceberg").createOrReplace()
 
     with sqlite3.connect("/data/sqlite/supplementary.db") as database:
-        rows = database.execute("SELECT school_id, district, school_type FROM school_context ORDER BY school_id").fetchall()
+        rows = database.execute(
+            "SELECT school_id, district, school_type FROM school_context ORDER BY school_id"
+        ).fetchall()
     context = spark.createDataFrame(rows, ["school_id", "district", "school_type"])
     context.writeTo("education.school_context_bronze").using("iceberg").createOrReplace()
 
+
+def run_silver(spark: SparkSession) -> None:
+    attendance = spark.table("education.attendance_bronze")
     valid = attendance.filter(F.col("status_code").isin("P", "A", "L"))
     valid.writeTo("education.attendance_silver").using("iceberg").createOrReplace()
     invalid = attendance.filter(~F.col("status_code").isin("P", "A", "L"))
     invalid.writeTo("education.attendance_quarantine").using("iceberg").createOrReplace()
 
+
+def run_gold(spark: SparkSession) -> None:
+    valid = spark.table("education.attendance_silver")
+    context = spark.table("education.school_context_bronze")
     gold = (
         valid.groupBy("school_id", "record_date")
         .agg(
@@ -110,11 +128,55 @@ def main() -> None:
             F.sum(F.when(F.col("status_code") == "P", 1).otherwise(0)).alias("present_count"),
             F.sum(F.when(F.col("status_code") == "A", 1).otherwise(0)).alias("absent_count"),
         )
+        .join(context, "school_id", "left")
         .withColumn("attendance_rate", F.round(F.col("present_count") / F.col("submitted_count"), 4))
+        .select(
+            "school_id",
+            "district",
+            "school_type",
+            "record_date",
+            "submitted_count",
+            "present_count",
+            "absent_count",
+            "attendance_rate",
+        )
     )
     gold.writeTo("education.school_daily_attendance_summary").using("iceberg").createOrReplace()
-    spark.stop()
-    emit_lineage("COMPLETE", run_id)
+
+
+STAGES = {
+    "bronze": (
+        [
+            {"namespace": "postgresql://postgres-source:5432", "name": "attendance.public.student_attendance"},
+            {"namespace": "file:///data/sqlite", "name": "supplementary.db.school_context"},
+        ],
+        [iceberg_dataset("attendance_bronze"), iceberg_dataset("school_context_bronze")],
+        run_bronze,
+    ),
+    "silver": (
+        [iceberg_dataset("attendance_bronze")],
+        [iceberg_dataset("attendance_silver"), iceberg_dataset("attendance_quarantine")],
+        run_silver,
+    ),
+    "gold": (
+        [iceberg_dataset("attendance_silver"), iceberg_dataset("school_context_bronze")],
+        [iceberg_dataset("school_daily_attendance_summary")],
+        run_gold,
+    ),
+}
+
+
+def main() -> None:
+    stage = sys.argv[1] if len(sys.argv) > 1 else "all"
+    if stage == "all":
+        for stage_name in ("bronze", "silver", "gold"):
+            inputs, outputs, fn = STAGES[stage_name]
+            run_stage(stage_name, inputs, outputs, fn)
+        return
+    if stage not in STAGES:
+        raise SystemExit(f"usage: medallion.py [all|bronze|silver|gold], got {stage!r}")
+    inputs, outputs, fn = STAGES[stage]
+    run_stage(stage, inputs, outputs, fn)
 
 
 if __name__ == "__main__":

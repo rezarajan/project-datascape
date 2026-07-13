@@ -444,7 +444,7 @@ spec:
         ELASTICSEARCH_SCHEME: http
         SEARCH_TYPE: opensearch
         PIPELINE_SERVICE_CLIENT_ENABLED: "false"
-        SECRET_MANAGER: noop
+        SECRET_MANAGER: db
       capDrop: [ALL]
       securityOpt: ["no-new-privileges:true"]
       memory: 2g
@@ -474,7 +474,7 @@ spec:
         ELASTICSEARCH_SCHEME: http
         SEARCH_TYPE: opensearch
         PIPELINE_SERVICE_CLIENT_ENABLED: "false"
-        SECRET_MANAGER: noop
+        SECRET_MANAGER: db
       healthcheck: [CMD, wget, -q, --spider, http://localhost:8586/healthcheck]
       securityOpt: ["no-new-privileges:true"]
       memory: 3g
