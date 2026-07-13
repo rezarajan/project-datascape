@@ -29,7 +29,10 @@ docs: build
 docs-serve: docs
     ./bin/platformctl docs serve --directory dist/docs --listen 127.0.0.1:8000
 
-reference-generate: build
+reference-clean-runtime:
+    if [ -f dist/reference/compose.yaml ]; then cd dist/reference && docker compose --env-file .env --profile governance down --volumes --remove-orphans; fi
+
+reference-generate: reference-clean-runtime build
     rm -rf dist/reference
     ./bin/platformctl generate --platform examples/reference-lakehouse/platform.yaml --profile profiles/reference.yaml --output dist/reference
     cp -R examples/reference-lakehouse/jobs dist/reference/jobs
@@ -40,13 +43,15 @@ reference-up: reference-generate
     cd dist/reference && docker compose --env-file .env up -d
     cd dist/reference && for attempt in $(seq 1 180); do if docker compose --env-file .env exec -T attendance-changes rpk topic describe attendance-changes --format json | grep -Eq '"high_watermark":[[:space:]]*[1-9]'; then exit 0; fi; sleep 2; done; echo "CDC did not publish attendance events within 360 seconds" >&2; exit 1
     cd dist/reference && docker compose --env-file .env exec -T lakehouse-pipeline /opt/spark/bin/spark-submit --conf spark.driver.memory=1g --conf spark.executor.memory=1g --conf spark.sql.shuffle.partitions=1 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.5 /opt/datascape/jobs/medallion.py bronze
-    cd dist/reference && docker compose --env-file .env exec -T lakehouse-pipeline /opt/spark/bin/spark-submit --conf spark.driver.memory=1g --conf spark.executor.memory=1g --conf spark.sql.shuffle.partitions=1 /opt/datascape/jobs/medallion.py silver
-    cd dist/reference && docker compose --env-file .env exec -T lakehouse-pipeline /opt/spark/bin/spark-submit --conf spark.driver.memory=1g --conf spark.executor.memory=1g --conf spark.sql.shuffle.partitions=1 /opt/datascape/jobs/medallion.py gold
+    cd dist/reference && docker compose --env-file .env exec -T lakehouse-pipeline /opt/spark/bin/spark-submit --conf spark.driver.memory=1g --conf spark.executor.memory=1g --conf spark.sql.shuffle.partitions=1 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.5 /opt/datascape/jobs/medallion.py silver
+    cd dist/reference && docker compose --env-file .env exec -T lakehouse-pipeline /opt/spark/bin/spark-submit --conf spark.driver.memory=1g --conf spark.executor.memory=1g --conf spark.sql.shuffle.partitions=1 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.5 /opt/datascape/jobs/medallion.py gold
     just reference-verify
 
-reference-governance-up: reference-generate
-    cd dist/reference && docker compose --env-file .env --profile governance up -d --scale metadata-bootstrap=0
+reference-governance-up:
+    test -f dist/reference/compose.yaml || just reference-generate
+    cd dist/reference && docker compose --env-file .env --profile governance up -d --scale metadata-bootstrap=0 --scale metadata-openlineage-ingest=0
     cd dist/reference && docker compose --env-file .env --profile governance up --no-deps metadata-bootstrap
+    cd dist/reference && docker compose --env-file .env --profile governance up --no-deps metadata-openlineage-ingest
 
 reference-verify:
     ./bin/platformctl verify --bundle dist/reference --runtime

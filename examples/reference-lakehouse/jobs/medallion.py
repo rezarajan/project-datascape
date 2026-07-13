@@ -12,6 +12,9 @@ from pyspark.sql import SparkSession, functions as F, types as T
 
 
 WAREHOUSE_NAMESPACE = "s3://datascape-lakehouse/warehouse"
+PRODUCER = "https://github.com/rezarajan/project-datascape"
+COLUMN_LINEAGE_SCHEMA = "https://openlineage.io/spec/facets/1-2-0/ColumnLineageDatasetFacet.json"
+OPENLINEAGE_TOPIC = "openlineage-events"
 
 
 def spark_session(stage: str) -> SparkSession:
@@ -41,38 +44,87 @@ def iceberg_dataset(name: str) -> dict:
     return {"namespace": WAREHOUSE_NAMESPACE, "name": f"datascape.education.{name}"}
 
 
-def emit_lineage(event_type: str, job_name: str, run_id: str, inputs: list[dict], outputs: list[dict]) -> None:
+def input_field(namespace: str, name: str, field: str, subtype: str, description: str) -> dict:
+    return {
+        "namespace": namespace,
+        "name": name,
+        "field": field,
+        "transformations": [
+            {
+                "type": "DIRECT",
+                "subtype": subtype,
+                "description": description,
+                "masking": False,
+            }
+        ],
+    }
+
+
+def column_lineage(fields: dict[str, list[dict]]) -> dict:
+    return {
+        "_producer": PRODUCER,
+        "_schemaURL": COLUMN_LINEAGE_SCHEMA,
+        "fields": {
+            column: {"inputFields": sorted(inputs, key=lambda field: (field["namespace"], field["name"], field["field"]))}
+            for column, inputs in sorted(fields.items())
+        },
+    }
+
+
+def with_column_lineage(dataset: dict, fields: dict[str, list[dict]]) -> dict:
+    return {**dataset, "facets": {"columnLineage": column_lineage(fields)}}
+
+
+def direct_columns(namespace: str, name: str, columns: list[str], description: str) -> dict[str, list[dict]]:
+    return {
+        column: [input_field(namespace, name, column, "IDENTITY", description)]
+        for column in columns
+    }
+
+
+def emit_lineage(
+    spark: SparkSession,
+    event_type: str,
+    job_name: str,
+    run_id: str,
+    inputs: list[dict],
+    outputs: list[dict],
+) -> None:
     event = {
         "eventType": event_type,
         "eventTime": datetime.now(timezone.utc).isoformat(),
         "run": {"runId": run_id},
         "job": {"namespace": "datascape-reference", "name": job_name},
-        "producer": "https://github.com/rezarajan/project-datascape",
+        "producer": PRODUCER,
         "schemaURL": "https://openlineage.io/spec/1-0-5/OpenLineage.json",
         "inputs": inputs,
         "outputs": outputs,
     }
+    payload = json.dumps(event, sort_keys=True)
     request = urllib.request.Request(
         "http://lineage-backend:5000/api/v1/lineage",
-        data=json.dumps(event).encode("utf-8"),
+        data=payload.encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=10) as response:
         if response.status >= 300:
             raise RuntimeError(f"lineage backend returned {response.status}")
+    spark.createDataFrame([(payload,)], ["value"]).write.format("kafka").option(
+        "kafka.bootstrap.servers", "attendance-changes:9092"
+    ).option("topic", OPENLINEAGE_TOPIC).save()
 
 
 def run_stage(stage: str, inputs: list[dict], outputs: list[dict], fn) -> None:
     run_id = str(uuid.uuid4())
-    emit_lineage("START", f"attendance-{stage}", run_id, inputs, outputs)
     spark = spark_session(stage)
     try:
+        emit_lineage(spark, "START", f"attendance-{stage}", run_id, inputs, outputs)
         spark.sql("CREATE NAMESPACE IF NOT EXISTS education")
         fn(spark)
+        emit_lineage(spark, "COMPLETE", f"attendance-{stage}", run_id, inputs, outputs)
     finally:
         spark.stop()
-    emit_lineage("COMPLETE", f"attendance-{stage}", run_id, inputs, outputs)
 
 
 def run_bronze(spark: SparkSession) -> None:
@@ -150,17 +202,161 @@ STAGES = {
             {"namespace": "postgresql://postgres-source:5432", "name": "attendance.public.student_attendance"},
             {"namespace": "file:///data/sqlite", "name": "supplementary.main.school_context"},
         ],
-        [iceberg_dataset("attendance_bronze"), iceberg_dataset("school_context_bronze")],
+        [
+            with_column_lineage(
+                iceberg_dataset("attendance_bronze"),
+                direct_columns(
+                    "postgresql://postgres-source:5432",
+                    "attendance.public.student_attendance",
+                    [
+                        "attendance_id",
+                        "school_id",
+                        "student_id",
+                        "record_date",
+                        "status_code",
+                        "submitted_at",
+                    ],
+                    "Bronze table preserves the CDC source column without transformation.",
+                ),
+            ),
+            with_column_lineage(
+                iceberg_dataset("school_context_bronze"),
+                direct_columns(
+                    "file:///data/sqlite",
+                    "supplementary.main.school_context",
+                    ["school_id", "district", "school_type"],
+                    "Bronze table preserves the SQLite source column without transformation.",
+                ),
+            ),
+        ],
         run_bronze,
     ),
     "silver": (
         [iceberg_dataset("attendance_bronze")],
-        [iceberg_dataset("attendance_silver"), iceberg_dataset("attendance_quarantine")],
+        [
+            with_column_lineage(
+                iceberg_dataset("attendance_silver"),
+                direct_columns(
+                    WAREHOUSE_NAMESPACE,
+                    "datascape.education.attendance_bronze",
+                    [
+                        "attendance_id",
+                        "school_id",
+                        "student_id",
+                        "record_date",
+                        "status_code",
+                        "submitted_at",
+                    ],
+                    "Silver table preserves validated bronze attendance columns.",
+                ),
+            ),
+            with_column_lineage(
+                iceberg_dataset("attendance_quarantine"),
+                direct_columns(
+                    WAREHOUSE_NAMESPACE,
+                    "datascape.education.attendance_bronze",
+                    [
+                        "attendance_id",
+                        "school_id",
+                        "student_id",
+                        "record_date",
+                        "status_code",
+                        "submitted_at",
+                    ],
+                    "Quarantine table preserves rejected bronze attendance columns for review.",
+                ),
+            ),
+        ],
         run_silver,
     ),
     "gold": (
         [iceberg_dataset("attendance_silver"), iceberg_dataset("school_context_bronze")],
-        [iceberg_dataset("school_daily_attendance_summary")],
+        [
+            with_column_lineage(
+                iceberg_dataset("school_daily_attendance_summary"),
+                {
+                    "school_id": [
+                        input_field(
+                            WAREHOUSE_NAMESPACE,
+                            "datascape.education.attendance_silver",
+                            "school_id",
+                            "IDENTITY",
+                            "Gold table groups attendance by school.",
+                        )
+                    ],
+                    "district": [
+                        input_field(
+                            WAREHOUSE_NAMESPACE,
+                            "datascape.education.school_context_bronze",
+                            "district",
+                            "IDENTITY",
+                            "Gold table enriches attendance with district context.",
+                        )
+                    ],
+                    "school_type": [
+                        input_field(
+                            WAREHOUSE_NAMESPACE,
+                            "datascape.education.school_context_bronze",
+                            "school_type",
+                            "IDENTITY",
+                            "Gold table enriches attendance with school type context.",
+                        )
+                    ],
+                    "record_date": [
+                        input_field(
+                            WAREHOUSE_NAMESPACE,
+                            "datascape.education.attendance_silver",
+                            "record_date",
+                            "IDENTITY",
+                            "Gold table groups attendance by record date.",
+                        )
+                    ],
+                    "submitted_count": [
+                        input_field(
+                            WAREHOUSE_NAMESPACE,
+                            "datascape.education.attendance_silver",
+                            "attendance_id",
+                            "AGGREGATION",
+                            "Submitted count aggregates validated attendance rows.",
+                        )
+                    ],
+                    "present_count": [
+                        input_field(
+                            WAREHOUSE_NAMESPACE,
+                            "datascape.education.attendance_silver",
+                            "status_code",
+                            "AGGREGATION",
+                            "Present count aggregates rows whose status code is present.",
+                        )
+                    ],
+                    "absent_count": [
+                        input_field(
+                            WAREHOUSE_NAMESPACE,
+                            "datascape.education.attendance_silver",
+                            "status_code",
+                            "AGGREGATION",
+                            "Absent count aggregates rows whose status code is absent.",
+                        )
+                    ],
+                    "attendance_rate": [
+                        input_field(
+                            WAREHOUSE_NAMESPACE,
+                            "datascape.education.attendance_silver",
+                            "attendance_id",
+                            "TRANSFORMATION",
+                            "Attendance rate divides present attendance by submitted attendance.",
+                        ),
+                        input_field(
+                            WAREHOUSE_NAMESPACE,
+                            "datascape.education.attendance_silver",
+                            "status_code",
+                            "TRANSFORMATION",
+                            "Attendance rate depends on present status-code counts.",
+                        ),
+                    ],
+                },
+            )
+        ],
         run_gold,
     ),
 }

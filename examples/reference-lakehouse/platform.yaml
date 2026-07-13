@@ -494,6 +494,21 @@ spec:
       securityOpt: ["no-new-privileges:true"]
       memory: 256m
       pidsLimit: 128
+    - name: metadata-openlineage-ingest
+      image: docker.getcollate.io/openmetadata/ingestion:1.13.1
+      profiles: [governance]
+      entrypoint: [sh]
+      command: [/opt/datascape/openmetadata/ingest_openlineage.sh]
+      dependsOn: [metadata-catalog, metadata-bootstrap, attendance-changes]
+      dependsOnCompleted: [metadata-migrate, metadata-bootstrap]
+      volumes:
+        - ./jobs/openmetadata:/opt/datascape/openmetadata:ro
+      environment:
+        OPENMETADATA_URL: http://metadata-catalog:8585/api/v1
+        OPENMETADATA_USERNAME: admin@open-metadata.org
+      securityOpt: ["no-new-privileges:true"]
+      memory: 1g
+      pidsLimit: 256
 ---
 apiVersion: platform.datascape.dev/v1alpha1
 kind: ProviderInstance

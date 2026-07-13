@@ -1,0 +1,37 @@
+source:
+  type: openlineage
+  serviceName: reference-openlineage
+  serviceConnection:
+    config:
+      type: OpenLineage
+      brokerConfig:
+        brokersUrl: attendance-changes:9092
+        topicName: openlineage-events
+        consumerGroupName: openmetadata-reference
+        consumerOffsets: earliest
+        poolTimeout: 3.0
+        sessionTimeout: 10
+        securityProtocol: PLAINTEXT
+      namespaceToServiceMapping:
+        postgresql://postgres-source:5432: reference-postgres
+        file:///data/sqlite: reference-sqlite
+        s3://datascape-lakehouse/warehouse: reference-lakehouse
+  sourceConfig:
+    config:
+      type: PipelineMetadata
+      includeLineage: true
+      lineageInformation:
+        dbServiceNames:
+          - reference-postgres
+          - reference-sqlite
+          - reference-lakehouse
+sink:
+  type: metadata-rest
+  config: {}
+workflowConfig:
+  loggerLevel: INFO
+  openMetadataServerConfig:
+    hostPort: http://metadata-catalog:8585/api
+    authProvider: openmetadata
+    securityConfig:
+      jwtToken: __OPENMETADATA_JWT_TOKEN__
