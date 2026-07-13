@@ -64,6 +64,12 @@ func run(ctx context.Context, args []string) error {
 		return cmdDiff(ctx, args[1:])
 	case "inspect":
 		return cmdInspect(ctx, args[1:])
+	case "status":
+		return cmdStatus(ctx, args[1:])
+	case "cdc":
+		return cmdCDC(ctx, args[1:])
+	case "operations":
+		return cmdOperations(ctx, args[1:])
 	case "api-resources":
 		return cmdAPIResources(ctx, args[1:])
 	case "api-definitions":
@@ -228,6 +234,120 @@ func cmdInspect(ctx context.Context, args []string) error {
 		}
 	}
 	return fmt.Errorf("resource %q not found", flags.resource)
+}
+
+func cmdStatus(ctx context.Context, args []string) error {
+	flags, docs, err := compileInputs(args)
+	if err != nil {
+		return err
+	}
+	result := compiler.CompileDocuments(ctx, docs, compileOptions(flags.target))
+	if err := failOnDiagnostics(result.Diagnostics); err != nil {
+		return err
+	}
+	status := map[string]any{
+		"target":             result.Plan.TargetPlan,
+		"resources":          len(result.Plan.Resources),
+		"bindings":           len(result.Plan.Bindings),
+		"cdcInstances":       len(result.Plan.CDC.Instances),
+		"cdcConnectors":      len(result.Plan.CDC.Connectors),
+		"operations":         len(result.Plan.Operations),
+		"verificationChecks": len(result.Plan.Verification.Checks),
+		"bundleDigest":       result.BundleDigest,
+	}
+	return printCanonical(status)
+}
+
+func cmdCDC(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return errors.New("cdc requires subcommand: connectors or describe")
+	}
+	switch args[0] {
+	case "connectors":
+		flags, docs, err := compileInputs(args[1:])
+		if err != nil {
+			return err
+		}
+		result := compiler.CompileDocuments(ctx, docs, compileOptions(flags.target))
+		if err := failOnDiagnostics(result.Diagnostics); err != nil {
+			return err
+		}
+		return printCanonical(result.Plan.CDC.Connectors)
+	case "describe":
+		flags, docs, err := compileInputs(args[1:])
+		if err != nil {
+			return err
+		}
+		result := compiler.CompileDocuments(ctx, docs, compileOptions(flags.target))
+		if err := failOnDiagnostics(result.Diagnostics); err != nil {
+			return err
+		}
+		if flags.resource == "" {
+			return printCanonical(result.Plan.CDC)
+		}
+		for _, instance := range result.Plan.CDC.Instances {
+			if strings.Contains(instance.Identity.Display(), flags.resource) || strings.Contains(instance.Identity.CanonicalString(), flags.resource) {
+				return printCanonical(instance)
+			}
+		}
+		for _, connector := range result.Plan.CDC.Connectors {
+			if strings.Contains(connector.Binding.Display(), flags.resource) || strings.Contains(connector.ConnectorName, flags.resource) {
+				return printCanonical(connector)
+			}
+		}
+		return fmt.Errorf("CDC resource %q not found", flags.resource)
+	default:
+		return fmt.Errorf("unknown cdc subcommand %q", args[0])
+	}
+}
+
+func cmdOperations(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return errors.New("operations requires subcommand: plan or generate")
+	}
+	switch args[0] {
+	case "plan":
+		flags, docs, err := compileInputs(args[1:])
+		if err != nil {
+			return err
+		}
+		result := compiler.CompileDocuments(ctx, docs, compileOptions(flags.target))
+		if err := failOnDiagnostics(result.Diagnostics); err != nil {
+			return err
+		}
+		return printCanonical(result.Plan.Operations)
+	case "generate":
+		flags, docs, err := compileInputs(args[1:])
+		if err != nil {
+			return err
+		}
+		result := compiler.CompileDocuments(ctx, docs, compileOptions(flags.target))
+		if err := failOnDiagnostics(result.Diagnostics); err != nil {
+			return err
+		}
+		output := flags.output
+		if output == "" {
+			output = filepath.Join("dist", "operations")
+		}
+		files := []artifact.File{
+			{Path: "operations/plan.json", Mode: 0o644, Deterministic: true},
+		}
+		content, err := canonical.JSON(result.Plan.Operations)
+		if err != nil {
+			return err
+		}
+		files[0].Content = append(content, '\n')
+		for _, operation := range result.Plan.Operations {
+			content, err := canonical.JSON(operation)
+			if err != nil {
+				return err
+			}
+			files = append(files, artifact.File{Path: "operations/requests/" + operation.Identity.Namespace + "-" + operation.Identity.Name + ".json", Mode: 0o644, Content: append(content, '\n'), Deterministic: true})
+		}
+		return artifact.WriteFiles(ctx, output, files)
+	default:
+		return fmt.Errorf("unknown operations subcommand %q", args[0])
+	}
 }
 
 func cmdAPIResources(ctx context.Context, args []string) error {
@@ -1142,6 +1262,11 @@ Commands:
   generate
   diff
   inspect
+  status
+  cdc connectors
+  cdc describe
+  operations plan
+  operations generate
   api-resources
   api-definitions
   providers
@@ -1207,6 +1332,37 @@ metadata:
 spec:
   eventClass: change
 ---
+apiVersion: connections.datascape.dev/v1alpha1
+kind: ConnectorClass
+metadata:
+  name: postgres-debezium
+spec:
+  interface: native
+  transport: tcp
+  driver: io.debezium.connector.postgresql.PostgresConnector
+  operations: [snapshot, change-stream]
+  compatibleEngines: [postgresql]
+---
+apiVersion: cdc.datascape.dev/v1alpha1
+kind: CDCClass
+metadata:
+  name: debezium-kafka-connect
+spec:
+  engine: kafka-connect
+  providerInstanceRef: ProviderInstance/default/local-cdc
+  supportedConnectorClasses: [postgres-debezium]
+  targetCompatibility: [compose]
+---
+apiVersion: cdc.datascape.dev/v1alpha1
+kind: CDCInstance
+metadata:
+  name: local-cdc
+  namespace: education
+spec:
+  classRef: CDCClass/debezium-kafka-connect
+  providerInstanceRef: ProviderInstance/default/local-cdc
+  resources: {memory: 1g, pidsLimit: 256}
+---
 apiVersion: stores.datascape.dev/v1alpha1
 kind: ObjectStore
 metadata:
@@ -1223,6 +1379,8 @@ metadata:
 spec:
   sourceRef: RelationalSource/student-records
   streamRef: EventStream/attendance-changes
+  cdcRef: CDCInstance/local-cdc
+  connectorClassRef: ConnectorClass/postgres-debezium
 ---
 apiVersion: bindings.datascape.dev/v1alpha1
 kind: StreamArchiveBinding

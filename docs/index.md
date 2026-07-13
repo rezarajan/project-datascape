@@ -10,6 +10,7 @@ Datascape is a deterministic data-platform compiler. Current release models plat
 - [Database and connector classes](specification/database-connectivity.md)
 - [Provider package authoring](development/provider-packages.md)
 - [Production Compose](usage/production-compose.md)
+- [CDC operations](operations/cdc-operations.md)
 - [Reference compatibility matrix](operations/compatibility-matrix.md)
 - [Recovery](usage/recovery.md)
 - [CLI reference](cli/reference.md)

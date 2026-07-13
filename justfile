@@ -45,7 +45,7 @@ reference-up: reference-generate
 reference-verify:
     ./bin/platformctl verify --bundle dist/reference --runtime
     cd dist/reference && docker compose --env-file .env exec -T attendance-changes rpk cluster health -X brokers=localhost:9092 | grep -E 'Healthy:.+true'
-    cd dist/reference && docker compose --env-file .env exec -T cdc-connector curl -fsS http://localhost:8083/connectors/attendance-source/status | grep -Eq '"state"[[:space:]]*:[[:space:]]*"RUNNING"'
+    cd dist/reference && docker compose --env-file .env exec -T cdc-education-shared-operational-cdc curl -fsS http://localhost:8083/connectors/education-postgres-attendance-cdc/status | grep -Eq '"state"[[:space:]]*:[[:space:]]*"RUNNING"'
     cd dist/reference && docker compose --env-file .env exec -T query-engine trino --output-format TSV --execute "SELECT count(*) FROM iceberg.education.school_daily_attendance_summary" | grep -Eq '^[1-9][0-9]*$'
 
 reference-logs:

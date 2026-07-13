@@ -26,7 +26,12 @@ func TestIntegrationComposeConfigValidates(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("docker", "compose", "-f", filepath.Join(dir, "compose.yaml"), "config", "-q")
-	cmd.Env = append(os.Environ(), "DATASCAPE_SOURCE_PASSWORD=test", "MINIO_ROOT_PASSWORD=test")
+	cmd.Env = append(os.Environ(),
+		"DATASCAPE_SOURCE_PASSWORD=test",
+		"EDUCATION_STUDENT_RECORDS_DB_CREDENTIALS_USERNAME=datascape",
+		"EDUCATION_STUDENT_RECORDS_DB_CREDENTIALS_PASSWORD=test",
+		"MINIO_ROOT_PASSWORD=test",
+	)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("docker compose config failed: %v\n%s", err, output)
 	}

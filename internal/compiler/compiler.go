@@ -189,6 +189,12 @@ func BuildPlan(ctx context.Context, resources []spec.Resource, target string) (i
 	plan.Definitions = definitionPlans(definitions)
 	plan.Providers = providerPlans(providers)
 	plan.ProviderInstances = providerInstancePlans(providers)
+	cdcPlan, cdcDiags := buildCDCPlan(resources, resolvedBindings, providers, target)
+	diags = append(diags, cdcDiags...)
+	plan.CDC = cdcPlan
+	operations, operationDiags := buildOperationPlans(resources, cdcPlan, target)
+	diags = append(diags, operationDiags...)
+	plan.Operations = operations
 	planned, plannedDiags := plannedProviderResources(resources, resolvedBindings, definitions, providers, target)
 	diags = append(diags, plannedDiags...)
 	plan.PlannedResources = planned
@@ -404,6 +410,9 @@ func parseReference(ref string, owner spec.Resource, target string) domain.Resou
 		apiVersion = parts[0] + "/" + parts[1]
 		kind, ns, name = parts[2], parts[3], parts[4]
 	}
+	if kind == "StorageClass" || kind == "PersistentVolume" || kind == "DatabaseClass" || kind == "ConnectorClass" || kind == "CDCClass" {
+		ns = "default"
+	}
 	return domain.ResourceIdentity{APIVersion: apiVersion, Kind: kind, Namespace: ns, Name: name, Target: target, Adapter: "foundation"}
 }
 
@@ -415,8 +424,14 @@ func apiVersionForKind(kind string) string {
 		return "streams.datascape.dev/v1alpha1"
 	case "EventContract":
 		return "contracts.datascape.dev/v1alpha1"
-	case "DatabaseConnection", "ObjectStoreConnection", "EventStreamConnection":
+	case "DatabaseConnection", "ObjectStoreConnection", "EventStreamConnection", "ConnectorClass":
 		return "connections.datascape.dev/v1alpha1"
+	case "DatabaseClass", "DatabaseInstance":
+		return "databases.datascape.dev/v1alpha1"
+	case "CDCClass", "CDCInstance":
+		return "cdc.datascape.dev/v1alpha1"
+	case "CDCOperation":
+		return "operations.datascape.dev/v1alpha1"
 	case "ObjectStore", "Warehouse":
 		return "stores.datascape.dev/v1alpha1"
 	case "LineageSink":
@@ -427,7 +442,7 @@ func apiVersionForKind(kind string) string {
 		return "pipelines.datascape.dev/v1alpha1"
 	case "Table":
 		return "tables.datascape.dev/v1alpha1"
-	case "CDCBinding", "StreamPublishBinding", "StreamArchiveBinding", "LineageBinding", "AuditBinding", "PipelineBinding", "AccessBinding":
+	case "CDCBinding", "StreamPublishBinding", "StreamArchiveBinding", "LineageBinding", "AuditBinding", "PipelineBinding", "AccessBinding", "BatchIngestBinding", "StreamIngestBinding", "TransformBinding", "VolumeMountBinding":
 		return "bindings.datascape.dev/v1alpha1"
 	default:
 		return spec.APIVersionV1Alpha1
@@ -497,8 +512,15 @@ func secretKeys(resource spec.Resource) []string {
 func generatedFilesForResource(resource spec.Resource, target string) []string {
 	files := []string{"plan.json", "resources.json", "resource-graph.json"}
 	switch resource.Kind {
+	case "CDCClass", "CDCInstance":
+		files = append(files, "configuration/cdc/plan.json", "verification/checks.json")
+	case "CDCOperation":
+		files = append(files, "operations/plan.json", "operations/requests/"+defaultNamespace(resource.Metadata.Namespace)+"-"+resource.Metadata.Name+".json", "verification/checks.json")
 	case "Binding", "CDCBinding", "StreamPublishBinding", "StreamArchiveBinding", "LineageBinding", "AuditBinding", "PipelineBinding", "AccessBinding", "BatchIngestBinding", "StreamIngestBinding", "TransformBinding", "VolumeMountBinding":
 		files = append(files, "configuration/bindings/"+resource.Metadata.Name+".json", "verification/checks.json")
+		if resource.Kind == "CDCBinding" {
+			files = append(files, "configuration/cdc/"+defaultNamespace(resource.Metadata.Namespace))
+		}
 	case "StorageClass", "PersistentVolume", "PersistentVolumeClaim":
 		files = append(files, "storage/plan.json")
 	case "Provider", "ProviderInstance":

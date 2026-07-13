@@ -13,12 +13,13 @@ running resources continuously.
 | StorageClass | `StorageClass` | Reusable storage/provisioning policy |
 | PV/PVC | `PersistentVolume` / `PersistentVolumeClaim` | Supply and request durable storage |
 | Volume mount | `VolumeMountBinding` | Attach a claim to a data workload |
+| Controller instance | `CDCInstance` | One managed or external CDC runtime boundary |
 | Admission | Schema and semantic validation | Reject invalid graphs before rendering |
 
-Datascape adds concepts specific to integrated data platforms: database and
-connector classes, relational sources, event streams, object stores, Iceberg
-catalogs, medallion tables, pipelines, lineage, quality rules and typed data-flow
-bindings.
+Datascape adds concepts specific to integrated data platforms: database classes,
+connector classes, CDC classes and instances, relational sources, event streams,
+object stores, Iceberg catalogs, medallion tables, pipelines, lineage, quality
+rules and typed data-flow bindings.
 
 Compose remains a single-host projection. A class such as Longhorn can be
 represented for a future Kubernetes target, but it is rejected when selected by

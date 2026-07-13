@@ -237,6 +237,32 @@ func validateCoreInvariants(res spec.Resource, body map[string]any) []domain.Dia
 		if !containsString([]string{"tcp", "unix", "file"}, stringValue(body["transport"])) {
 			diags = append(diags, diag(res, "DCONN008", "spec.transport", "connector transport must be tcp, unix, or file", "model network and file access separately from the driver interface"))
 		}
+	case "CDCClass":
+		if !containsString([]string{"kafka-connect"}, stringValue(body["engine"])) {
+			diags = append(diags, diag(res, "DCDC001", "spec.engine", "CDC class engine must be kafka-connect", "declare a supported CDC runtime engine"))
+		}
+	case "CDCInstance":
+		if stringValue(body["classRef"]) == "" {
+			diags = append(diags, diag(res, "DCDC002", "spec.classRef", "CDC instance must reference a CDCClass", "set spec.classRef"))
+		}
+		ownership := stringValue(body["ownership"])
+		if ownership != "" && !containsString([]string{"managed", "imported", "external"}, ownership) {
+			diags = append(diags, diag(res, "DCDC003", "spec.ownership", "CDC ownership must be managed, imported, or external", "choose an explicit supported ownership mode"))
+		}
+		policy := stringValue(body["managementPolicy"])
+		if policy != "" && !containsString([]string{"ManagedConnectors", "ObserveOnly"}, policy) {
+			diags = append(diags, diag(res, "DCDC004", "spec.managementPolicy", "CDC managementPolicy must be ManagedConnectors or ObserveOnly", "choose whether Datascape can manage connectors or only observe"))
+		}
+	case "CDCOperation":
+		if stringValue(body["targetRef"]) == "" {
+			diags = append(diags, diag(res, "DOPS001", "spec.targetRef", "CDC operation must target a CDC resource", "set targetRef to a CDCBinding or CDCInstance"))
+		}
+		if stringValue(body["action"]) == "" {
+			diags = append(diags, diag(res, "DOPS002", "spec.action", "CDC operation must declare an action", "set a provider-supported action such as PauseConnector or ResetOffsets"))
+		}
+		if stringValue(body["idempotencyKey"]) == "" {
+			diags = append(diags, diag(res, "DOPS003", "spec.idempotencyKey", "CDC operation must declare a stable idempotency key", "set a unique operation key that can be rerun safely"))
+		}
 	case "DatabaseInstance":
 		if stringValue(body["classRef"]) == "" {
 			diags = append(diags, diag(res, "DDB002", "spec.classRef", "database instance must reference a DatabaseClass", "set spec.classRef"))
@@ -310,6 +336,27 @@ func validateReferences(resources []spec.Resource) []domain.Diagnostic {
 			for _, ref := range typedBindingRefs(res.Kind) {
 				diags = append(diags, validateRefField(res, body, byID, ref.field, ref.expectedKind, ref.allowBuiltin)...)
 			}
+		case "CDCClass":
+			diags = append(diags, validateRefField(res, body, byID, "providerInstanceRef", "ProviderInstance", true)...)
+			for _, connectorName := range stringSlice(body["supportedConnectorClasses"]) {
+				connectorRef := connectorName
+				if !strings.Contains(connectorRef, "/") {
+					connectorRef = "ConnectorClass/" + connectorRef
+				}
+				ref := parseRef(connectorRef, res, "ConnectorClass")
+				if ref.Name != "" {
+					if _, ok := byID[ref.CanonicalString()]; !ok {
+						diags = append(diags, diag(res, "DCDC005", "spec.supportedConnectorClasses", "supported connector class does not exist: "+connectorName, "declare the ConnectorClass or remove it from the CDCClass"))
+					}
+				}
+			}
+		case "CDCInstance":
+			diags = append(diags, validateRefField(res, body, byID, "classRef", "CDCClass", false)...)
+			diags = append(diags, validateRefField(res, body, byID, "providerInstanceRef", "ProviderInstance", true)...)
+			diags = append(diags, validateRefField(res, body, byID, "credentialsRef", "SecretReference", false)...)
+		case "CDCOperation":
+			diags = append(diags, validateRefField(res, body, byID, "targetRef", "", false)...)
+			diags = append(diags, validateRefField(res, body, byID, "providerInstanceRef", "ProviderInstance", true)...)
 		case "RelationalSource":
 			diags = append(diags, validateRefField(res, body, byID, "connectionRef", "DatabaseConnection", false)...)
 		case "DatabaseInstance":
@@ -332,6 +379,8 @@ func validateReferences(resources []spec.Resource) []domain.Diagnostic {
 		}
 	}
 	diags = append(diags, validateDatabaseTopology(resources, byID)...)
+	diags = append(diags, validateCDCTopology(resources, byID)...)
+	diags = append(diags, validateCDCOperations(resources, byID)...)
 	return diags
 }
 
@@ -459,6 +508,268 @@ func databaseEngineForSource(sourceRef any, owner spec.Resource, byID map[string
 	return stringValue(classBody["engine"])
 }
 
+func validateCDCTopology(resources []spec.Resource, byID map[string]spec.Resource) []domain.Diagnostic {
+	diags := make([]domain.Diagnostic, 0)
+	target := runtimeTarget(resources)
+	production := productionProfile(resources)
+	cdcInstances := make([]spec.Resource, 0)
+	for _, res := range resources {
+		if res.Kind == "CDCInstance" {
+			cdcInstances = append(cdcInstances, res)
+		}
+	}
+	for _, cdcClass := range resources {
+		if cdcClass.Kind != "CDCClass" {
+			continue
+		}
+		body, ok := specBodyOK(cdcClass)
+		if !ok {
+			continue
+		}
+		if target != "" {
+			compat := stringSlice(body["targetCompatibility"])
+			if len(compat) > 0 && !containsString(compat, target) {
+				diags = append(diags, diag(cdcClass, "DCDC006", "spec.targetCompatibility", "CDC class is not compatible with target "+target, "choose a CDCClass that includes the deployment target"))
+			}
+		}
+	}
+	for _, instance := range cdcInstances {
+		body, ok := specBodyOK(instance)
+		if !ok {
+			continue
+		}
+		classID := parseRef(stringValue(body["classRef"]), instance, "CDCClass")
+		class, ok := byID[classID.CanonicalString()]
+		if !ok {
+			continue
+		}
+		classBody, _ := specBodyOK(class)
+		if target != "" {
+			compat := stringSlice(classBody["targetCompatibility"])
+			if len(compat) > 0 && !containsString(compat, target) {
+				diags = append(diags, diag(instance, "DCDC006", "spec.classRef", "CDC instance class is not compatible with target "+target, "choose a target-compatible CDCClass"))
+			}
+		}
+		ownership := stringValue(body["ownership"])
+		if ownership == "external" || ownership == "imported" {
+			endpoint, _ := body["endpoint"].(map[string]any)
+			if stringValue(endpoint["url"]) == "" && stringValue(endpoint["host"]) == "" {
+				diags = append(diags, diag(instance, "DCDC007", "spec.endpoint", "external CDC instance must declare a control endpoint", "set endpoint.url or endpoint.host/port for verification and connector management"))
+			}
+		}
+	}
+	for _, binding := range resources {
+		if binding.Kind != "CDCBinding" {
+			continue
+		}
+		body, ok := specBodyOK(binding)
+		if !ok {
+			continue
+		}
+		cdcRef := stringValue(body["cdcRef"])
+		if cdcRef == "" {
+			if production {
+				diags = append(diags, diag(binding, "DCDC008", "spec.cdcRef", "production CDC bindings must explicitly reference a CDCInstance", "set spec.cdcRef to avoid implicit runtime selection"))
+			} else if len(cdcInstances) > 1 {
+				diags = append(diags, diag(binding, "DCDC009", "spec.cdcRef", "CDC runtime inference is ambiguous because multiple CDCInstance resources exist", "set spec.cdcRef explicitly"))
+			}
+			continue
+		}
+		cdcID := parseRef(cdcRef, binding, "CDCInstance")
+		cdcInstance, ok := byID[cdcID.CanonicalString()]
+		if !ok {
+			continue
+		}
+		connectorID := parseRef(stringValue(body["connectorClassRef"]), binding, "ConnectorClass")
+		if connectorID.Name == "" {
+			continue
+		}
+		cdcBody, _ := specBodyOK(cdcInstance)
+		classID := parseRef(stringValue(cdcBody["classRef"]), cdcInstance, "CDCClass")
+		cdcClass, ok := byID[classID.CanonicalString()]
+		if !ok {
+			continue
+		}
+		classBody, _ := specBodyOK(cdcClass)
+		supported := stringSlice(classBody["supportedConnectorClasses"])
+		if len(supported) > 0 && !refListContains(supported, connectorID, cdcClass) {
+			diags = append(diags, diag(binding, "DCDC010", "spec.connectorClassRef", "connector class is not supported by the referenced CDCClass", "choose one of the CDCClass supportedConnectorClasses"))
+		}
+	}
+	return diags
+}
+
+func validateCDCOperations(resources []spec.Resource, byID map[string]spec.Resource) []domain.Diagnostic {
+	diags := make([]domain.Diagnostic, 0)
+	operationKeys := map[string]spec.Resource{}
+	for _, op := range resources {
+		if op.Kind != "CDCOperation" {
+			continue
+		}
+		body, ok := specBodyOK(op)
+		if !ok {
+			continue
+		}
+		target := parseRef(stringValue(body["targetRef"]), op, "")
+		action := stringValue(body["action"])
+		key := stringValue(body["idempotencyKey"])
+		if prior, exists := operationKeys[key]; key != "" && exists {
+			priorBody, _ := specBodyOK(prior)
+			if stringValue(priorBody["targetRef"]) != stringValue(body["targetRef"]) || stringValue(priorBody["action"]) != action {
+				diags = append(diags, diag(op, "DOPS004", "spec.idempotencyKey", "idempotency key is reused for a different operation", "use one stable key per logical operation"))
+			}
+		} else if key != "" {
+			operationKeys[key] = op
+		}
+		cdcInstance := operationCDCInstance(target, op, byID)
+		if cdcInstance.Name != "" {
+			if instance, ok := byID[cdcInstance.CanonicalString()]; ok {
+				instanceBody, _ := specBodyOK(instance)
+				ownership := stringValue(instanceBody["ownership"])
+				policy := cdcManagementPolicy(instanceBody)
+				if policy == "ObserveOnly" && operationMutates(action) {
+					diags = append(diags, diag(op, "DOPS005", "spec.action", "ObserveOnly CDC instances reject mutation operations", "change the CDCInstance managementPolicy or choose a read-only operation"))
+				}
+				if (ownership == "external" || ownership == "imported") && policy == "ManagedConnectors" && operationManagesWorker(action) {
+					diags = append(diags, diag(op, "DOPS006", "spec.action", "external ManagedConnectors CDC instances do not allow worker-management operations", "target connector operations only or declare an explicit worker-management contract"))
+				}
+			}
+		}
+		if operationDestructive(action) {
+			approval, _ := body["approval"].(map[string]any)
+			if !boolValue(approval["required"], false) && !boolValue(approval["approved"], false) {
+				diags = append(diags, diag(op, "DOPS007", "spec.approval", "destructive CDC operation requires explicit approval", "set approval.required: true and record the approval workflow"))
+			}
+		}
+		if action == "ResetOffsets" {
+			parameters, _ := body["parameters"].(map[string]any)
+			if stringValue(parameters["backupRef"]) == "" && stringValue(parameters["backupMetadata"]) == "" {
+				diags = append(diags, diag(op, "DOPS008", "spec.parameters.backupRef", "offset reset requires backup metadata", "capture and reference exported offsets before reset"))
+			}
+			if !containsString(stringSlice(body["preconditions"]), "ConnectorPaused") {
+				diags = append(diags, diag(op, "DOPS009", "spec.preconditions", "offset reset requires the connector to be paused", "add ConnectorPaused to preconditions and verify it before execution"))
+			}
+		}
+		if action == "DeleteCDCInstance" || action == "Delete" {
+			if target.Kind == "CDCInstance" && cdcInstanceHasBindings(target, resources) {
+				diags = append(diags, diag(op, "DOPS010", "spec.targetRef", "shared CDC instance cannot be deleted while bindings reference it", "delete or move referencing CDCBinding resources first"))
+			}
+		}
+	}
+	return diags
+}
+
+func refListContains(values []string, target domain.ResourceIdentity, owner spec.Resource) bool {
+	for _, value := range values {
+		refValue := value
+		if !strings.Contains(refValue, "/") {
+			refValue = target.Kind + "/" + refValue
+		}
+		ref := parseRef(refValue, owner, target.Kind)
+		if ref.CanonicalString() == target.CanonicalString() {
+			return true
+		}
+	}
+	return false
+}
+
+func operationCDCInstance(target domain.ResourceIdentity, owner spec.Resource, byID map[string]spec.Resource) domain.ResourceIdentity {
+	switch target.Kind {
+	case "CDCInstance":
+		return target
+	case "CDCBinding":
+		binding, ok := byID[target.CanonicalString()]
+		if !ok {
+			return domain.ResourceIdentity{}
+		}
+		body, _ := specBodyOK(binding)
+		return parseRef(stringValue(body["cdcRef"]), binding, "CDCInstance")
+	default:
+		_ = owner
+		return domain.ResourceIdentity{}
+	}
+}
+
+func cdcInstanceHasBindings(instance domain.ResourceIdentity, resources []spec.Resource) bool {
+	for _, res := range resources {
+		if res.Kind != "CDCBinding" {
+			continue
+		}
+		body, ok := specBodyOK(res)
+		if !ok {
+			continue
+		}
+		ref := parseRef(stringValue(body["cdcRef"]), res, "CDCInstance")
+		if ref.CanonicalString() == instance.CanonicalString() {
+			return true
+		}
+	}
+	return false
+}
+
+func cdcManagementPolicy(body map[string]any) string {
+	if policy := stringValue(body["managementPolicy"]); policy != "" {
+		return policy
+	}
+	if stringValue(body["ownership"]) == "external" || stringValue(body["ownership"]) == "imported" {
+		return "ObserveOnly"
+	}
+	return "ManagedConnectors"
+}
+
+func operationMutates(action string) bool {
+	return !containsString([]string{"Inspect", "InspectOffsets", "VerifyConnector", "ValidateConnectivity", "PlanBackup", "PlanRestore"}, action)
+}
+
+func operationManagesWorker(action string) bool {
+	return containsString([]string{"ScaleWorker", "UpgradeWorker", "RestartWorker", "ReplaceWorker", "RotateWorkerCertificate"}, action)
+}
+
+func operationDestructive(action string) bool {
+	return containsString([]string{"ResetOffsets", "DeleteConnector", "DeleteCDCInstance", "Delete", "DetachAndDelete"}, action)
+}
+
+func runtimeTarget(resources []spec.Resource) string {
+	for _, res := range resources {
+		if res.Kind != "RuntimeProfile" && res.Kind != "Target" {
+			continue
+		}
+		body, ok := specBodyOK(res)
+		if !ok {
+			continue
+		}
+		if target := stringValue(body["target"]); target != "" {
+			return target
+		}
+		if target := stringValue(body["type"]); target != "" {
+			return target
+		}
+	}
+	return ""
+}
+
+func productionProfile(resources []spec.Resource) bool {
+	for _, res := range resources {
+		if res.Kind != "RuntimeProfile" && res.Kind != "Target" {
+			continue
+		}
+		body, ok := specBodyOK(res)
+		if !ok {
+			continue
+		}
+		development, _ := body["development"].(map[string]any)
+		if boolValue(development["enabled"], false) || boolValue(development["allowUnpinnedImages"], false) {
+			continue
+		}
+		availability, _ := body["availability"].(map[string]any)
+		class := stringValue(availability["class"])
+		if class == "production" || class == "single-host-production" {
+			return true
+		}
+	}
+	return false
+}
+
 type typedRef struct {
 	field        string
 	expectedKind string
@@ -484,7 +795,7 @@ func typedBindingRefs(kind string) []typedRef {
 	refs := []typedRef{{field: "providerInstanceRef", expectedKind: "ProviderInstance", allowBuiltin: true}}
 	switch kind {
 	case "CDCBinding":
-		refs = append(refs, typedRef{field: "sourceRef"}, typedRef{field: "streamRef", expectedKind: "EventStream"}, typedRef{field: "connectorClassRef", expectedKind: "ConnectorClass"})
+		refs = append(refs, typedRef{field: "sourceRef"}, typedRef{field: "streamRef", expectedKind: "EventStream"}, typedRef{field: "cdcRef", expectedKind: "CDCInstance"}, typedRef{field: "connectorClassRef", expectedKind: "ConnectorClass"})
 	case "StreamPublishBinding":
 		refs = append(refs, typedRef{field: "sourceRef", expectedKind: "EventProducer"}, typedRef{field: "streamRef", expectedKind: "EventStream"})
 	case "StreamArchiveBinding":
@@ -542,7 +853,7 @@ func parseRef(value string, owner spec.Resource, expectedKind string) domain.Res
 
 func clusterScopedKind(kind string) bool {
 	switch kind {
-	case "StorageClass", "PersistentVolume", "DatabaseClass", "ConnectorClass":
+	case "StorageClass", "PersistentVolume", "DatabaseClass", "ConnectorClass", "CDCClass":
 		return true
 	default:
 		return false
@@ -561,6 +872,10 @@ func apiVersionForKind(kind string) string {
 		return "connections.datascape.dev/v1alpha1"
 	case "DatabaseClass", "DatabaseInstance":
 		return "databases.datascape.dev/v1alpha1"
+	case "CDCClass", "CDCInstance":
+		return "cdc.datascape.dev/v1alpha1"
+	case "CDCOperation":
+		return "operations.datascape.dev/v1alpha1"
 	case "StorageClass", "PersistentVolume", "PersistentVolumeClaim":
 		return "storage.datascape.dev/v1alpha1"
 	case "ObjectStore", "Warehouse":
@@ -769,6 +1084,10 @@ func findSecretValues(res spec.Resource, path string, value any, diags *[]domain
 			nextPath := key
 			if path != "" {
 				nextPath = path + "." + key
+			}
+			if strings.Contains(nextPath, "mapping.") || strings.HasSuffix(nextPath, "configMapping."+key) {
+				findSecretValues(res, nextPath, typed[key], diags)
+				continue
 			}
 			lower := strings.ToLower(key)
 			if isSecretKey(lower) {

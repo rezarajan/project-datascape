@@ -235,23 +235,28 @@ func (r *Registry) Instance(id domain.ResourceIdentity) (Instance, Descriptor, b
 }
 
 func (r *Registry) ResolveCapability(capability, target string) (Instance, Descriptor, bool) {
-	for _, instance := range r.Instances() {
-		if target != "" && instance.Target != "" && instance.Target != target {
-			continue
-		}
-		if !contains(instance.Capabilities, capability) {
-			continue
-		}
-		descriptor, ok := r.ProviderForInstance(instance)
-		if !ok || !targetCompatible(descriptor, target) {
-			continue
-		}
-		return instance, descriptor, true
+	candidates := r.CapabilityCandidates(capability, target)
+	if len(candidates) == 1 {
+		return candidates[0].Instance, candidates[0].Descriptor, true
 	}
 	return Instance{}, Descriptor{}, false
 }
 
 func (r *Registry) ResolveBinding(capability, bindingKind, target string) (Instance, Descriptor, bool) {
+	candidates := r.BindingCandidates(capability, bindingKind, target)
+	if len(candidates) == 1 {
+		return candidates[0].Instance, candidates[0].Descriptor, true
+	}
+	return Instance{}, Descriptor{}, false
+}
+
+type Candidate struct {
+	Instance   Instance
+	Descriptor Descriptor
+}
+
+func (r *Registry) CapabilityCandidates(capability, target string) []Candidate {
+	out := make([]Candidate, 0)
 	for _, instance := range r.Instances() {
 		if target != "" && instance.Target != "" && instance.Target != target {
 			continue
@@ -263,12 +268,20 @@ func (r *Registry) ResolveBinding(capability, bindingKind, target string) (Insta
 		if !ok || !targetCompatible(descriptor, target) {
 			continue
 		}
-		if len(descriptor.BindingKinds) > 0 && !contains(descriptor.BindingKinds, bindingKind) {
+		out = append(out, Candidate{Instance: instance, Descriptor: descriptor})
+	}
+	return out
+}
+
+func (r *Registry) BindingCandidates(capability, bindingKind, target string) []Candidate {
+	out := make([]Candidate, 0)
+	for _, candidate := range r.CapabilityCandidates(capability, target) {
+		if len(candidate.Descriptor.BindingKinds) > 0 && !contains(candidate.Descriptor.BindingKinds, bindingKind) {
 			continue
 		}
-		return instance, descriptor, true
+		out = append(out, candidate)
 	}
-	return Instance{}, Descriptor{}, false
+	return out
 }
 
 func BuiltinDescriptors() []Descriptor {
@@ -288,12 +301,12 @@ func BuiltinDescriptors() []Descriptor {
 		{
 			Identity:            providerIdentity("local-source"),
 			Type:                "datascape.dev/source",
-			Capabilities:        []string{"datascape.dev/source.relational", "datascape.dev/source.change-stream"},
+			Capabilities:        []string{"datascape.dev/source.relational"},
 			ResourceKinds:       []resource.KindRef{{APIVersion: "sources.datascape.dev/v1alpha1", Kind: "RelationalSource"}},
-			BindingKinds:        []string{"Binding", "CDCBinding"},
+			BindingKinds:        []string{"Binding"},
 			TargetCompatibility: []string{"compose"},
 			RendererContract:    "datascape.dev/provider-plan/v1alpha1",
-			Conformance:         []string{"SOURCE-001", "CDC-001"},
+			Conformance:         []string{"SOURCE-001"},
 			Services: []Service{{
 				Name:        "relational-source",
 				Capability:  "datascape.dev/source.relational",
@@ -303,6 +316,18 @@ func BuiltinDescriptors() []Descriptor {
 				Volumes:     []string{"relational-source-data:/var/lib/postgresql/data"},
 				Healthcheck: []string{"CMD-SHELL", "pg_isready -U datascape -d datascape"},
 			}},
+		},
+		{
+			Identity:            providerIdentity("local-cdc"),
+			Type:                "datascape.dev/cdc",
+			Capabilities:        []string{"datascape.dev/source.change-stream"},
+			ResourceKinds:       []resource.KindRef{{APIVersion: "cdc.datascape.dev/v1alpha1", Kind: "CDCInstance"}},
+			BindingKinds:        []string{"Binding", "CDCBinding"},
+			TargetCompatibility: []string{"compose"},
+			RendererContract:    "datascape.dev/provider-plan/v1alpha1",
+			ContractVersion:     "v1alpha1",
+			PackageVersion:      "builtin",
+			Conformance:         []string{"CDC-001"},
 		},
 		{
 			Identity:            providerIdentity("local-event-stream"),

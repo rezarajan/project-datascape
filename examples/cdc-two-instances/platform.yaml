@@ -1,0 +1,91 @@
+apiVersion: platform.datascape.dev/v1alpha1
+kind: Target
+metadata: {name: cdc-two-instances}
+spec: {type: compose}
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: SecretReference
+metadata: {name: source-credentials, namespace: education}
+spec: {backend: env, keys: [username, password]}
+---
+apiVersion: connections.datascape.dev/v1alpha1
+kind: ConnectorClass
+metadata: {name: postgres-debezium}
+spec:
+  interface: native
+  transport: tcp
+  driver: io.debezium.connector.postgresql.PostgresConnector
+  operations: [snapshot, change-stream]
+  compatibleEngines: [postgresql]
+---
+apiVersion: cdc.datascape.dev/v1alpha1
+kind: CDCClass
+metadata: {name: debezium-kafka-connect}
+spec:
+  engine: kafka-connect
+  providerInstanceRef: ProviderInstance/default/local-cdc
+  supportedConnectorClasses: [postgres-debezium]
+---
+apiVersion: cdc.datascape.dev/v1alpha1
+kind: CDCInstance
+metadata: {name: shared-cdc, namespace: education}
+spec:
+  classRef: CDCClass/debezium-kafka-connect
+  providerInstanceRef: ProviderInstance/default/local-cdc
+  resources: {cpus: "1", memory: 1g, pidsLimit: 256}
+---
+apiVersion: cdc.datascape.dev/v1alpha1
+kind: CDCInstance
+metadata: {name: isolated-cdc, namespace: education}
+spec:
+  classRef: CDCClass/debezium-kafka-connect
+  providerInstanceRef: ProviderInstance/default/local-cdc
+  resources: {cpus: "2", memory: 2g, pidsLimit: 512}
+---
+apiVersion: connections.datascape.dev/v1alpha1
+kind: DatabaseConnection
+metadata: {name: appdb, namespace: education}
+spec:
+  engine: postgresql
+  host: postgres-source
+  port: 5432
+  database: app
+  credentialsRef: SecretReference/source-credentials
+---
+apiVersion: sources.datascape.dev/v1alpha1
+kind: RelationalSource
+metadata: {name: finance, namespace: education}
+spec: {connectionRef: DatabaseConnection/appdb, tables: [public.payments]}
+---
+apiVersion: sources.datascape.dev/v1alpha1
+kind: RelationalSource
+metadata: {name: operations, namespace: education}
+spec: {connectionRef: DatabaseConnection/appdb, tables: [public.orders]}
+---
+apiVersion: streams.datascape.dev/v1alpha1
+kind: EventStream
+metadata: {name: finance-events, namespace: education}
+spec: {}
+---
+apiVersion: streams.datascape.dev/v1alpha1
+kind: EventStream
+metadata: {name: operations-events, namespace: education}
+spec: {}
+---
+apiVersion: bindings.datascape.dev/v1alpha1
+kind: CDCBinding
+metadata: {name: finance-cdc, namespace: education}
+spec:
+  sourceRef: RelationalSource/finance
+  streamRef: EventStream/finance-events
+  cdcRef: CDCInstance/shared-cdc
+  connectorClassRef: ConnectorClass/postgres-debezium
+---
+apiVersion: bindings.datascape.dev/v1alpha1
+kind: CDCBinding
+metadata: {name: operations-cdc, namespace: education}
+spec:
+  sourceRef: RelationalSource/operations
+  streamRef: EventStream/operations-events
+  cdcRef: CDCInstance/isolated-cdc
+  connectorClassRef: ConnectorClass/postgres-debezium

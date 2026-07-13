@@ -1,0 +1,70 @@
+apiVersion: platform.datascape.dev/v1alpha1
+kind: Target
+metadata: {name: cdc-external-managed}
+spec: {type: compose}
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: SecretReference
+metadata: {name: source-credentials, namespace: education}
+spec: {backend: env, keys: [username, password]}
+---
+apiVersion: connections.datascape.dev/v1alpha1
+kind: ConnectorClass
+metadata: {name: postgres-debezium}
+spec:
+  interface: native
+  transport: tcp
+  driver: io.debezium.connector.postgresql.PostgresConnector
+  operations: [snapshot, change-stream]
+  compatibleEngines: [postgresql]
+---
+apiVersion: cdc.datascape.dev/v1alpha1
+kind: CDCClass
+metadata: {name: debezium-kafka-connect}
+spec:
+  engine: kafka-connect
+  providerInstanceRef: ProviderInstance/default/local-cdc
+  supportedConnectorClasses: [postgres-debezium]
+---
+apiVersion: cdc.datascape.dev/v1alpha1
+kind: CDCInstance
+metadata: {name: externally-operated-cdc, namespace: education}
+spec:
+  classRef: CDCClass/debezium-kafka-connect
+  ownership: external
+  providerInstanceRef: ProviderInstance/default/local-cdc
+  managementPolicy: ManagedConnectors
+  endpoint: {url: "https://connect.example"}
+  verification:
+    checks:
+      - id: EXTERNAL-CDC-ENDPOINT
+        description: external Kafka Connect endpoint is reachable
+---
+apiVersion: connections.datascape.dev/v1alpha1
+kind: DatabaseConnection
+metadata: {name: appdb, namespace: education}
+spec:
+  engine: postgresql
+  host: postgres-source
+  port: 5432
+  database: app
+  credentialsRef: SecretReference/source-credentials
+---
+apiVersion: sources.datascape.dev/v1alpha1
+kind: RelationalSource
+metadata: {name: finance, namespace: education}
+spec: {connectionRef: DatabaseConnection/appdb, tables: [public.payments]}
+---
+apiVersion: streams.datascape.dev/v1alpha1
+kind: EventStream
+metadata: {name: finance-events, namespace: education}
+spec: {}
+---
+apiVersion: bindings.datascape.dev/v1alpha1
+kind: CDCBinding
+metadata: {name: finance-cdc, namespace: education}
+spec:
+  sourceRef: RelationalSource/finance
+  streamRef: EventStream/finance-events
+  cdcRef: CDCInstance/externally-operated-cdc
+  connectorClassRef: ConnectorClass/postgres-debezium

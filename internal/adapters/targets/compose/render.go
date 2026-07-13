@@ -40,12 +40,17 @@ func Render(ctx context.Context, plan ir.PlatformPlan) ([]artifact.File, error) 
 		jsonValue("providers/instances.json", plan.ProviderInstances),
 		jsonValue("providers/planned-resources.json", plan.PlannedResources),
 		jsonValue("configuration/bindings/bindings.json", plan.Bindings),
+		jsonValue("configuration/cdc/plan.json", plan.CDC),
+		jsonValue("operations/plan.json", plan.Operations),
+		jsonValue("operations/catalog.json", operationCatalog()),
 		jsonValue("verification/checks.json", verificationChecks(plan)),
 		text("verification/README.md", "# Verification\n\nRun `platformctl verify --bundle dist/local --runtime` after starting the generated Compose project.\n"),
 		jsonValue("recovery/dependency-graph.json", plan.Recovery),
 		jsonValue("storage/plan.json", plan.Storage),
 	}
 	files = append(files, bindingFiles(plan)...)
+	files = append(files, cdcFiles(plan)...)
+	files = append(files, operationFiles(plan)...)
 	files = append(files, providerArtifactFiles(plan)...)
 	return artifact.Normalize(files), nil
 }
@@ -269,6 +274,19 @@ func collectServices(plan ir.PlatformPlan) []ir.TargetServicePlan {
 			byName[service.Name] = service
 		}
 	}
+	for _, service := range cdcServices(plan, byName) {
+		if existing, ok := byName[service.Name]; ok {
+			existing.DependsOn = sortedUnique(append(existing.DependsOn, service.DependsOn...))
+			existing.DependsOnCompleted = sortedUnique(append(existing.DependsOnCompleted, service.DependsOnCompleted...))
+			existing.Volumes = sortedUnique(append(existing.Volumes, service.Volumes...))
+			byName[service.Name] = existing
+			continue
+		}
+		service.DependsOn = sortedUnique(service.DependsOn)
+		service.DependsOnCompleted = sortedUnique(service.DependsOnCompleted)
+		service.Volumes = sortedUnique(service.Volumes)
+		byName[service.Name] = service
+	}
 	for _, mount := range plan.Storage.Mounts {
 		service, ok := byName[mount.Workload.Name]
 		if !ok {
@@ -372,6 +390,171 @@ func bindingFiles(plan ir.PlatformPlan) []artifact.File {
 		files = append(files, jsonValue("configuration/bindings/"+binding.Identity.Name+".json", binding))
 	}
 	return files
+}
+
+func cdcFiles(plan ir.PlatformPlan) []artifact.File {
+	files := make([]artifact.File, 0, len(plan.CDC.Connectors)+2)
+	for _, connector := range plan.CDC.Connectors {
+		files = append(files, jsonValue(connector.ConfigPath, connector.ProviderConfiguration))
+		files = append(files, jsonValue("verification/cdc/"+connector.Binding.Namespace+"-"+connector.Binding.Name+".json", map[string]any{
+			"binding":       connector.Binding.CanonicalString(),
+			"cdcInstance":   connector.CDCInstance.CanonicalString(),
+			"connectorName": connector.ConnectorName,
+			"state":         connector.State,
+			"checks":        connector.Verification,
+		}))
+	}
+	if len(plan.CDC.Connectors) > 0 {
+		files = append(files, text("operations/cdc/register_connector.py", registerConnectorScript))
+	}
+	return files
+}
+
+func operationFiles(plan ir.PlatformPlan) []artifact.File {
+	files := make([]artifact.File, 0, len(plan.Operations))
+	for _, operation := range plan.Operations {
+		files = append(files, jsonValue("operations/requests/"+operation.Identity.Namespace+"-"+operation.Identity.Name+".json", operation))
+	}
+	return files
+}
+
+func cdcServices(plan ir.PlatformPlan, providerServices map[string]ir.TargetServicePlan) []ir.TargetServicePlan {
+	byInstance := map[string][]ir.CDCConnectorPlan{}
+	for _, connector := range plan.CDC.Connectors {
+		byInstance[connector.CDCInstance.CanonicalString()] = append(byInstance[connector.CDCInstance.CanonicalString()], connector)
+	}
+	out := make([]ir.TargetServicePlan, 0)
+	for _, instance := range plan.CDC.Instances {
+		connectors := byInstance[instance.Identity.CanonicalString()]
+		if len(connectors) == 0 {
+			continue
+		}
+		workerName := cdcWorkerServiceName(instance.Identity)
+		if instance.Ownership == "managed" {
+			service := ir.TargetServicePlan{
+				Name:            workerName,
+				Capability:      "datascape.dev/source.change-stream",
+				Image:           stringParam(instance.Parameters, "image", "quay.io/debezium/connect:3.6.0.Final"),
+				Restart:         stringParam(instance.Parameters, "restart", "unless-stopped"),
+				StopGracePeriod: stringParam(instance.Parameters, "stopGracePeriod", "30s"),
+				Environment: map[string]string{
+					"BOOTSTRAP_SERVERS":                 stringParam(instance.Parameters, "bootstrapServers", defaultBootstrapServers(providerServices)),
+					"GROUP_ID":                          sanitizeName("datascape-" + instance.Identity.Namespace + "-" + instance.Identity.Name),
+					"CONFIG_STORAGE_TOPIC":              sanitizeName("datascape-" + instance.Identity.Namespace + "-" + instance.Identity.Name + "-configs"),
+					"OFFSET_STORAGE_TOPIC":              sanitizeName("datascape-" + instance.Identity.Namespace + "-" + instance.Identity.Name + "-offsets"),
+					"STATUS_STORAGE_TOPIC":              sanitizeName("datascape-" + instance.Identity.Namespace + "-" + instance.Identity.Name + "-status"),
+					"CONFIG_STORAGE_REPLICATION_FACTOR": "1",
+					"OFFSET_STORAGE_REPLICATION_FACTOR": "1",
+					"STATUS_STORAGE_REPLICATION_FACTOR": "1",
+				},
+				DependsOn:   cdcWorkerDependencies(connectors, providerServices),
+				Healthcheck: []string{"CMD-SHELL", "curl -fsS http://localhost:8083/connectors"},
+				SecurityOpt: []string{"no-new-privileges:true"},
+				CPUs:        instance.Resources.CPUs,
+				Memory:      instance.Resources.Memory,
+				PidsLimit:   instance.Resources.PidsLimit,
+			}
+			if ports, ok := stringSliceAny(instance.Parameters["ports"]); ok {
+				service.Ports = ports
+			}
+			out = append(out, service)
+		}
+		for _, connector := range connectors {
+			if instance.Ownership != "managed" && instance.ManagementPolicy != "ManagedConnectors" {
+				continue
+			}
+			endpoint := connectEndpoint(instance, workerName)
+			env := map[string]string{
+				"CONNECTOR_CONFIG": "/" + connector.ConfigPath,
+				"CONNECTOR_NAME":   connector.ConnectorName,
+				"CONNECT_URL":      endpoint,
+			}
+			for _, envName := range connector.CredentialEnvironment {
+				if envName != "" {
+					env[envName] = "${" + envName + ":?set " + envName + "}"
+				}
+			}
+			out = append(out, ir.TargetServicePlan{
+				Name:        cdcRegisterServiceName(connector),
+				Capability:  "datascape.dev/source.change-stream",
+				Image:       stringParam(instance.Parameters, "registrationImage", "python:3.13-alpine"),
+				Command:     []string{"python", "/operations/cdc/register_connector.py"},
+				DependsOn:   registerDependsOn(instance, workerName),
+				Volumes:     []string{"./configuration/cdc:/configuration/cdc:ro", "./operations:/operations:ro"},
+				Environment: env,
+				SecurityOpt: []string{"no-new-privileges:true"},
+				Memory:      "128m",
+				PidsLimit:   32,
+			})
+		}
+	}
+	return out
+}
+
+func cdcWorkerDependencies(connectors []ir.CDCConnectorPlan, providerServices map[string]ir.TargetServicePlan) []string {
+	values := make([]string, 0)
+	for _, connector := range connectors {
+		if connector.DatabaseEndpoint.Host != "" {
+			if _, ok := providerServices[connector.DatabaseEndpoint.Host]; ok {
+				values = append(values, connector.DatabaseEndpoint.Host)
+			}
+		}
+		if stream := streamServiceName(connector.DestinationStream, providerServices); stream != "" {
+			values = append(values, stream)
+		}
+	}
+	return sortedUnique(values)
+}
+
+func registerDependsOn(instance ir.CDCInstancePlan, workerName string) []string {
+	if instance.Ownership == "managed" {
+		return []string{workerName}
+	}
+	return nil
+}
+
+func connectEndpoint(instance ir.CDCInstancePlan, workerName string) string {
+	if instance.Ownership == "managed" {
+		return "http://" + workerName + ":8083/connectors/$${CONNECTOR_NAME}/config"
+	}
+	if instance.Endpoint.URL != "" {
+		return strings.TrimRight(instance.Endpoint.URL, "/") + "/connectors/$${CONNECTOR_NAME}/config"
+	}
+	if instance.Endpoint.Host != "" {
+		port := instance.Endpoint.Port
+		if port == "" {
+			port = "8083"
+		}
+		return "http://" + instance.Endpoint.Host + ":" + port + "/connectors/$${CONNECTOR_NAME}/config"
+	}
+	return "http://external-cdc:8083/connectors/$${CONNECTOR_NAME}/config"
+}
+
+func streamServiceName(stream domain.ResourceIdentity, providerServices map[string]ir.TargetServicePlan) string {
+	if _, ok := providerServices[stream.Name]; ok {
+		return stream.Name
+	}
+	if _, ok := providerServices["event-stream"]; ok {
+		return "event-stream"
+	}
+	for name, service := range providerServices {
+		if service.Capability == "datascape.dev/stream.publish" {
+			return name
+		}
+	}
+	return ""
+}
+
+func defaultBootstrapServers(providerServices map[string]ir.TargetServicePlan) string {
+	if _, ok := providerServices["event-stream"]; ok {
+		return "event-stream:9092"
+	}
+	for name, service := range providerServices {
+		if service.Capability == "datascape.dev/stream.publish" {
+			return name + ":9092"
+		}
+	}
+	return "event-stream:9092"
 }
 
 func providerArtifactFiles(plan ir.PlatformPlan) []artifact.File {
@@ -510,6 +693,82 @@ func envNamePart(value string) string {
 	return b.String()
 }
 
+func stringParam(values map[string]any, key, fallback string) string {
+	if s, ok := values[key].(string); ok && s != "" {
+		return s
+	}
+	return fallback
+}
+
+func stringSliceAny(value any) ([]string, bool) {
+	values, ok := value.([]any)
+	if !ok {
+		return nil, false
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if s, ok := value.(string); ok && s != "" {
+			out = append(out, s)
+		}
+	}
+	return sortedUnique(out), len(out) > 0
+}
+
+func cdcWorkerServiceName(id domain.ResourceIdentity) string {
+	if id.Namespace == "" || id.Namespace == "default" {
+		return sanitizeName("cdc-" + id.Name)
+	}
+	return sanitizeName("cdc-" + id.Namespace + "-" + id.Name)
+}
+
+func cdcRegisterServiceName(connector ir.CDCConnectorPlan) string {
+	return sanitizeName("cdc-register-" + connector.Binding.Namespace + "-" + connector.CDCInstance.Name + "-" + connector.Binding.Name)
+}
+
+func sanitizeName(value string) string {
+	value = strings.ToLower(value)
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func operationCatalog() []map[string]any {
+	actions := []string{
+		"CreateOrReconcileConnector", "UpdateConnectorConfig", "PauseConnector", "ResumeConnector", "RestartConnector",
+		"RestartFailedTasks", "DeleteConnector", "MoveConnector", "ChangeTableFilters", "IncrementalSnapshot",
+		"Resnapshot", "ValidateConnectivity", "VerifyConnector", "InspectOffsets", "ExportOffsets", "ImportOffsets",
+		"ResetOffsets", "ScaleWorker", "UpgradeWorker", "BackupPlan", "RestorePlan", "RotateDatabaseCredentials",
+		"RotateCDCControlCredentials", "RotateStreamCredentials", "AdoptConnector", "DetachConnector", "DeleteCDCInstance",
+	}
+	out := make([]map[string]any, 0, len(actions))
+	for _, action := range actions {
+		out = append(out, map[string]any{
+			"name":                 action,
+			"applicableKinds":      []string{"CDCBinding", "CDCInstance"},
+			"parameterSchema":      map[string]any{"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "additionalProperties": true},
+			"mutatesExternalState": action != "ValidateConnectivity" && action != "VerifyConnector" && action != "InspectOffsets" && action != "BackupPlan" && action != "RestorePlan",
+			"destructive":          action == "ResetOffsets" || action == "DeleteConnector" || action == "DeleteCDCInstance",
+			"idempotent":           true,
+			"targetCompatibility":  []string{"compose"},
+			"executionContract":    "provider-adapter/v1alpha1",
+			"verificationContract": "verification-checks/v1alpha1",
+			"rollbackContract":     "recovery-plan/v1alpha1",
+		})
+	}
+	return out
+}
+
 func jsonList(values []string) string {
 	content, err := json.Marshal(values)
 	if err != nil {
@@ -556,3 +815,48 @@ func jsonFile(path string, content []byte) artifact.File {
 	content = append(bytes.TrimSpace(content), '\n')
 	return artifact.File{Path: path, Mode: 0o644, Content: content, Deterministic: true}
 }
+
+const registerConnectorScript = `"""Idempotently register a generated CDC connector configuration."""
+
+import json
+import os
+import time
+import urllib.error
+import urllib.request
+
+
+def expanded(value):
+    if isinstance(value, str):
+        return os.path.expandvars(value)
+    if isinstance(value, dict):
+        return {k: expanded(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [expanded(v) for v in value]
+    return value
+
+
+def main() -> None:
+    connector_url = os.environ["CONNECT_URL"]
+    config_path = os.environ["CONNECTOR_CONFIG"]
+    with open(config_path, "r", encoding="utf-8") as handle:
+        body = json.dumps(expanded(json.load(handle))).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    token = os.environ.get("CDC_CONTROL_TOKEN")
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    for attempt in range(60):
+        request = urllib.request.Request(connector_url, data=body, headers=headers, method="PUT")
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                if response.status < 300:
+                    return
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == 59:
+                raise
+            time.sleep(2)
+    raise RuntimeError("CDC runtime did not accept the connector configuration")
+
+
+if __name__ == "__main__":
+    main()
+`

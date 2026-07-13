@@ -5,17 +5,17 @@ Database lifecycle and database access are modeled separately.
 - `DatabaseClass` selects an engine-compatible provider and storage policy.
 - `DatabaseInstance` represents one managed, imported or external database.
 - `ConnectorClass` describes interface, transport, driver and operations.
+- `CDCClass` describes a CDC runtime implementation and supported connector classes.
+- `CDCInstance` represents one managed, imported or external CDC runtime.
 - `DatabaseConnection` binds an instance to one connector.
 - `RelationalSource` describes the data available through the connection.
 - An ingestion binding chooses CDC, batch or another operation.
 
 ## PostgreSQL
 
-The reference PostgreSQL class provisions a persistent network service. Its
-JDBC connector uses `transport: tcp`, so the connection supplies a service
-endpoint. The `CDCBinding` separately references a native logical-replication
-connector class backed by Debezium Kafka Connect; query access and change-data
-capture are therefore not conflated on the source.
+The reference PostgreSQL class provisions a persistent network service. Its JDBC connector uses `transport: tcp`, so the connection supplies a service endpoint. `CDCBinding` separately references a native logical-replication connector class and a `CDCInstance`; query access, database ownership and change-data capture runtime ownership are not conflated.
+
+External databases use `DatabaseInstance.spec.ownership: external` plus a managed `DatabaseConnection` with endpoint and `SecretReference`. The Compose target renders no database container for that source, but generated CDC connector configuration still resolves host, port, database name and secret environment references.
 
 ## SQLite
 

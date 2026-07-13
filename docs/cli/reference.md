@@ -8,6 +8,11 @@ Commands:
 - `platformctl generate`
 - `platformctl diff`
 - `platformctl inspect`
+- `platformctl status`
+- `platformctl cdc connectors`
+- `platformctl cdc describe`
+- `platformctl operations plan`
+- `platformctl operations generate`
 - `platformctl api-resources`
 - `platformctl api-definitions`
 - `platformctl providers`
@@ -24,6 +29,8 @@ Commands:
 - `platformctl version`
 
 Commands operate on deterministic compiler artifacts. Compose generation derives services from resolved provider instances and binding capabilities.
+
+CDC commands are read-only. `operations plan` and `operations generate` produce deterministic operation artifacts; they do not mutate a live CDC runtime.
 
 Common generation flow:
 

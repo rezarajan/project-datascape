@@ -8,7 +8,8 @@ not general-purpose container orchestration. Most users author:
 
 - components such as `RelationalSource`, `EventStream`, `ObjectStore`, `LineageSink`, `AuditStore`, `Pipeline`, `Table`, and `Warehouse`;
 - classes, instances and connections such as `DatabaseClass`, `ConnectorClass`,
-  `DatabaseInstance`, `DatabaseConnection` and `SecretReference`;
+  `CDCClass`, `DatabaseInstance`, `CDCInstance`, `DatabaseConnection` and
+  `SecretReference`;
 - `StorageClass`, `PersistentVolume`, `PersistentVolumeClaim` and
   `VolumeMountBinding` for durable state;
 - typed bindings for CDC, batch/stream ingestion, transformation, lineage,
@@ -20,7 +21,9 @@ not general-purpose container orchestration. Most users author:
 
 Resources describe durable platform intent. Classes describe reusable policy,
 connections describe access, providers advertise portable capabilities, and
-bindings declare relationships and data movement. Targets choose how the
+bindings declare relationships and data movement. CDC workers are modeled as
+first-class `CDCInstance` resources so connector sharing, isolation, external
+ownership and day-2 operation plans remain reviewable. Targets choose how the
 normalized graph is rendered.
 
 Secrets are always references. `SecretReference.spec.backend` is one of `env`, `file`, `kubernetes`, or `vault`, and `spec.keys` lists logical keys such as `username`, `password`, `token`, `accessKey`, and `secretKey`.

@@ -24,7 +24,8 @@ The platform contains:
 
 - PostgreSQL 18 reached through a TCP/JDBC connection and logical replication;
 - SQLite reached through a mounted file and ODBC connector class;
-- Debezium Kafka Connect and Redpanda for the change stream;
+- one managed Debezium Kafka Connect `CDCInstance` shared by two CDC bindings;
+- Redpanda for the logical change streams;
 - S3-compatible object storage and an Iceberg/Nessie catalog;
 - bronze, silver, quarantine and gold Iceberg datasets;
 - Spark processing, Trino queries and OpenLineage emission to Marquez;
@@ -35,6 +36,8 @@ Useful commands:
 
 ```sh
 just reference-verify
+./bin/platformctl cdc connectors --platform examples/reference-lakehouse/platform.yaml --profile profiles/reference.yaml
+./bin/platformctl operations plan --platform examples/reference-lakehouse/platform.yaml --profile profiles/reference.yaml
 just reference-logs
 just reference-down
 just reference-reset

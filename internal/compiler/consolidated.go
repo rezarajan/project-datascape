@@ -183,56 +183,98 @@ func providerInstancePlans(registry *provider.Registry) []ir.ProviderInstancePla
 }
 
 func plannedProviderResources(resources []spec.Resource, bindings []binding.Resolved, definitions *resource.Registry, providers *provider.Registry, target string) ([]ir.ProviderResourcePlan, []domain.Diagnostic) {
-	required := map[string]string{}
-	requested := map[string]domain.ResourceIdentity{}
+	type requirement struct {
+		capability string
+		requester  domain.ResourceIdentity
+		requested  domain.ResourceIdentity
+		reason     string
+	}
+	byID := resourceIndex(resources, target)
+	required := make([]requirement, 0)
 	for _, res := range resources {
 		body, _ := resourceBody(res)
 		if graphState(resourceOwnership(res, body), resourceLifecycle(body)) != "satisfied" {
 			continue
 		}
 		for _, capability := range resourceCapabilities(res, definitions) {
-			required[capability] = res.Identity(target, "").Display()
-			if ref := stringValue(body["providerInstanceRef"]); ref != "" {
-				requested[capability] = providerInstanceIdentity(ref, res, target)
+			if skipResourceCapabilityPlanning(res, capability, byID, target) {
+				continue
 			}
+			item := requirement{capability: capability, requester: res.Identity(target, ""), reason: res.Identity(target, "").Display()}
+			if ref := stringValue(body["providerInstanceRef"]); ref != "" {
+				item.requested = providerInstanceIdentity(ref, res, target)
+			}
+			required = append(required, item)
 		}
 	}
 	for _, b := range bindings {
 		if b.State == "disabled" || b.State == "deferred" {
 			continue
 		}
-		required[b.Capability] = b.Identity.Display()
-		if b.ProviderInstance.Name != "" {
-			requested[b.Capability] = b.ProviderInstance
-		}
+		required = append(required, requirement{capability: b.Capability, requester: b.Identity, requested: b.ProviderInstance, reason: b.Identity.Display()})
 		for _, capability := range b.DependencyClosure {
-			required[capability] = b.Identity.Display()
+			if capability == b.Capability {
+				continue
+			}
+			if skipBindingDependencyCapability(b, capability, byID, target) {
+				continue
+			}
+			required = append(required, requirement{capability: capability, requester: b.Identity, requested: bindingDependencyProviderInstance(b, capability, byID, target), reason: b.Identity.Display()})
 		}
 	}
 	if target == "compose" && len(required) > 0 {
-		required["datascape.dev/runtime.utility"] = "compose target runtime tasks"
+		required = append(required, requirement{
+			capability: "datascape.dev/runtime.utility",
+			requester:  domain.ResourceIdentity{APIVersion: api.PlatformV1Alpha1, Kind: "Target", Namespace: api.DefaultNamespace, Name: "compose-runtime", Target: target},
+			reason:     "compose target runtime tasks",
+		})
 	}
-	capabilities := make([]string, 0, len(required))
-	for capability := range required {
-		capabilities = append(capabilities, capability)
+	dedup := map[string]requirement{}
+	for _, item := range required {
+		if item.capability == "" || item.requester.Name == "" {
+			continue
+		}
+		key := item.capability + "|" + item.requester.CanonicalString() + "|" + item.requested.CanonicalString()
+		dedup[key] = item
 	}
-	sort.Strings(capabilities)
-	plans := make([]ir.ProviderResourcePlan, 0, len(capabilities))
+	keys := make([]string, 0, len(dedup))
+	for key := range dedup {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	plans := make([]ir.ProviderResourcePlan, 0, len(keys))
 	diags := make([]domain.Diagnostic, 0)
-	for _, capability := range capabilities {
+	for _, key := range keys {
+		item := dedup[key]
+		capability := item.capability
 		instance, descriptor, ok := provider.Instance{}, provider.Descriptor{}, false
-		if requestedInstance := requested[capability]; requestedInstance.Name != "" {
+		if requestedInstance := item.requested; requestedInstance.Name != "" {
 			instance, descriptor, ok = providers.Instance(requestedInstance)
 			if ok && !containsValue(instance.Capabilities, capability) {
 				ok = false
 			}
 		} else {
 			instance, descriptor, ok = providers.ResolveCapability(capability, target)
+			if !ok {
+				candidates := providers.CapabilityCandidates(capability, target)
+				if len(candidates) > 1 {
+					diags = append(diags, domain.Diagnostic{
+						Severity:    domain.SeverityError,
+						Code:        "DPROV010",
+						Resource:    item.requester.Display(),
+						FieldPath:   "spec.providerInstanceRef",
+						Message:     "multiple provider instances can satisfy required capability " + capability,
+						Remediation: "set providerInstanceRef on the requesting resource or binding",
+					})
+					continue
+				}
+			}
 		}
 		if !ok {
 			diags = append(diags, domain.Diagnostic{
 				Severity:    domain.SeverityError,
 				Code:        "DPROV008",
+				Resource:    item.requester.Display(),
 				FieldPath:   "spec.capability",
 				Message:     "no provider instance can satisfy required capability " + capability,
 				Remediation: "declare a Provider and ProviderInstance for the required capability",
@@ -244,20 +286,76 @@ func plannedProviderResources(resources []spec.Resource, bindings []binding.Reso
 				APIVersion: api.PlatformV1Alpha1,
 				Kind:       "ProviderResource",
 				Namespace:  api.DefaultNamespace,
-				Name:       sanitizeName(capability),
+				Name:       sanitizeName(capability + "-" + item.requester.Namespace + "-" + item.requester.Kind + "-" + item.requester.Name + "-" + instance.Identity.Namespace + "-" + instance.Identity.Name),
 				Target:     target,
 				Adapter:    descriptor.Identity.Name,
 			},
 			Capability:       capability,
+			Requester:        item.requester,
 			ProviderInstance: instance.Identity,
 			Provider:         descriptor.Identity,
-			Reason:           required[capability],
+			Reason:           item.reason,
 			Services:         servicesForCapability(descriptor.Services, capability),
 			Artifacts:        artifactsForCapability(descriptor.Artifacts, capability),
 		})
 	}
 	sort.SliceStable(plans, func(i, j int) bool { return plans[i].Identity.CanonicalString() < plans[j].Identity.CanonicalString() })
 	return plans, diags
+}
+
+func resourceIndex(resources []spec.Resource, target string) map[string]spec.Resource {
+	out := map[string]spec.Resource{}
+	for _, res := range resources {
+		out[res.Identity(target, "").CanonicalString()] = res
+	}
+	return out
+}
+
+func skipResourceCapabilityPlanning(res spec.Resource, capability string, byID map[string]spec.Resource, target string) bool {
+	switch res.Kind {
+	case "Provider", "ProviderInstance", "ResourceDefinition", "BindingDefinition", "RuntimeProfile", "Target", "PlatformPolicy":
+		return true
+	}
+	if res.Kind == "RelationalSource" && capability == "datascape.dev/source.relational" {
+		return relationalSourceExternal(res, byID, target)
+	}
+	return false
+}
+
+func skipBindingDependencyCapability(b binding.Resolved, capability string, byID map[string]spec.Resource, target string) bool {
+	if capability == "datascape.dev/source.relational" && b.Source.Kind == "RelationalSource" {
+		if source, ok := byID[b.Source.CanonicalString()]; ok {
+			return relationalSourceExternal(source, byID, target)
+		}
+	}
+	return false
+}
+
+func bindingDependencyProviderInstance(b binding.Resolved, capability string, byID map[string]spec.Resource, target string) domain.ResourceIdentity {
+	switch capability {
+	case "datascape.dev/source.relational":
+		return providerInstanceForResource(b.Source, byID, target)
+	case "datascape.dev/stream.publish":
+		return providerInstanceForResource(b.Target, byID, target)
+	default:
+		return domain.ResourceIdentity{}
+	}
+}
+
+func providerInstanceForResource(id domain.ResourceIdentity, byID map[string]spec.Resource, target string) domain.ResourceIdentity {
+	res, ok := byID[id.CanonicalString()]
+	if !ok {
+		return domain.ResourceIdentity{}
+	}
+	body, ok := resourceBody(res)
+	if !ok {
+		return domain.ResourceIdentity{}
+	}
+	ref := stringValue(body["providerInstanceRef"])
+	if ref == "" {
+		return domain.ResourceIdentity{}
+	}
+	return providerInstanceIdentity(ref, res, target)
 }
 
 func providerInstanceIdentity(value string, owner spec.Resource, target string) domain.ResourceIdentity {
@@ -284,6 +382,8 @@ func bindingPlans(bindings []binding.Resolved) []ir.BindingPlan {
 			Capability:        b.Capability,
 			Source:            b.Source,
 			Target:            b.Target,
+			CDCInstance:       b.CDCInstance,
+			ConnectorClass:    b.ConnectorClass,
 			ProviderInstance:  b.ProviderInstance,
 			Mode:              b.Mode,
 			Ownership:         b.Ownership,
@@ -333,6 +433,16 @@ func buildVerification(resources []spec.Resource, graph ir.ResourceGraphPlan, pl
 	}
 	for _, ext := range graph.External {
 		checks = append(checks, ext.Verification...)
+	}
+	for _, res := range resources {
+		if res.Kind == "CDCInstance" {
+			id := "CDC-RUNTIME-" + strings.ToUpper(sanitizeName(defaultNamespace(res.Metadata.Namespace)+"-"+res.Metadata.Name))
+			checks = append(checks, ir.VerificationCheck{ID: id, Description: "CDC runtime " + res.Metadata.Name + " control endpoint and worker health are verified"})
+		}
+		if res.Kind == "CDCOperation" {
+			id := "CDC-OPERATION-" + strings.ToUpper(sanitizeName(defaultNamespace(res.Metadata.Namespace)+"-"+res.Metadata.Name))
+			checks = append(checks, ir.VerificationCheck{ID: id, Description: "CDC operation plan " + res.Metadata.Name + " has required preconditions and verification checks"})
+		}
 	}
 	sort.SliceStable(checks, func(i, j int) bool { return checks[i].ID < checks[j].ID })
 	return ir.VerificationPlan{PolicyRef: policyRef, Checks: checks}

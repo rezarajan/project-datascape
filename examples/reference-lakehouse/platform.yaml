@@ -53,9 +53,9 @@ spec:
   contractVersion: v1alpha1
   rendererContract: datascape.dev/provider-plan/v1alpha1
   targetCompatibility: [compose]
-  capabilities: [datascape.dev/database.provision, datascape.dev/source.relational, datascape.dev/source.change-stream]
-  bindingKinds: [CDCBinding]
-  conformance: [SOURCE-001, CDC-001]
+  capabilities: [datascape.dev/database.provision, datascape.dev/source.relational]
+  bindingKinds: []
+  conformance: [SOURCE-001]
   services:
     - name: postgres-source
       image: postgres:18-alpine
@@ -81,35 +81,6 @@ spec:
       securityOpt: ["no-new-privileges:true"]
       memory: 256m
       pidsLimit: 64
-    - name: cdc-connector
-      image: quay.io/debezium/connect:3.6.0.Final
-      restart: unless-stopped
-      dependsOn: [postgres-source, attendance-changes]
-      environment:
-        BOOTSTRAP_SERVERS: attendance-changes:9092
-        GROUP_ID: datascape-reference-cdc
-        CONFIG_STORAGE_TOPIC: datascape-reference-connect-configs
-        OFFSET_STORAGE_TOPIC: datascape-reference-connect-offsets
-        STATUS_STORAGE_TOPIC: datascape-reference-connect-status
-        CONFIG_STORAGE_REPLICATION_FACTOR: "1"
-        OFFSET_STORAGE_REPLICATION_FACTOR: "1"
-        STATUS_STORAGE_REPLICATION_FACTOR: "1"
-      ports: [127.0.0.1:18083:8083]
-      healthcheck: [CMD-SHELL, "curl -fsS http://localhost:8083/connectors"]
-      securityOpt: ["no-new-privileges:true"]
-      memory: 1g
-      pidsLimit: 256
-    - name: cdc-register
-      image: python:3.13-alpine
-      command: [python, /opt/datascape/debezium/register_connector.py]
-      dependsOn: [cdc-connector]
-      volumes: ["./jobs:/opt/datascape:ro"]
-      environment:
-        EDUCATION_POSTGRES_CREDENTIALS_USERNAME: ${EDUCATION_POSTGRES_CREDENTIALS_USERNAME:-datascape}
-        EDUCATION_POSTGRES_CREDENTIALS_PASSWORD: "${EDUCATION_POSTGRES_CREDENTIALS_PASSWORD:?set by reference-up}"
-      securityOpt: ["no-new-privileges:true"]
-      memory: 128m
-      pidsLimit: 32
 ---
 apiVersion: platform.datascape.dev/v1alpha1
 kind: ProviderInstance
@@ -118,6 +89,30 @@ metadata:
   namespace: education
 spec:
   providerRef: Provider/reference-source
+  target: compose
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: Provider
+metadata:
+  name: reference-cdc
+  namespace: education
+spec:
+  type: datascape.dev/cdc
+  packageVersion: 0.1.0
+  contractVersion: v1alpha1
+  rendererContract: datascape.dev/provider-plan/v1alpha1
+  targetCompatibility: [compose]
+  capabilities: [datascape.dev/source.change-stream]
+  bindingKinds: [CDCBinding]
+  conformance: [CDC-001]
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: ProviderInstance
+metadata:
+  name: reference-cdc
+  namespace: education
+spec:
+  providerRef: Provider/reference-cdc
   target: compose
 ---
 apiVersion: platform.datascape.dev/v1alpha1
@@ -256,8 +251,8 @@ spec:
       image: tabulario/spark-iceberg:3.5.5_1.8.1
       restart: unless-stopped
       command: [sleep, infinity]
-      dependsOn: [postgres-source, sqlite-source, attendance-changes, cdc-register, lakehouse-store, object-store-bootstrap, iceberg-catalog, lineage-backend]
-      dependsOnCompleted: [cdc-register, object-store-bootstrap]
+      dependsOn: [postgres-source, sqlite-source, attendance-changes, cdc-register-education-shared-operational-cdc-postgres-attendance-cdc, lakehouse-store, object-store-bootstrap, iceberg-catalog, lineage-backend]
+      dependsOnCompleted: [cdc-register-education-shared-operational-cdc-postgres-attendance-cdc, object-store-bootstrap]
       volumes: ["./jobs:/opt/datascape/jobs:ro"]
       environment:
         EDUCATION_POSTGRES_CREDENTIALS_USERNAME: ${EDUCATION_POSTGRES_CREDENTIALS_USERNAME:-datascape}
@@ -595,8 +590,23 @@ spec:
   driver: io.debezium.connector.postgresql.PostgresConnector
   operations: [snapshot, change-stream]
   compatibleEngines: [postgresql]
-  providerInstanceRef: ProviderInstance/education/reference-source
+  providerInstanceRef: ProviderInstance/education/reference-cdc
   targetCompatibility: [compose]
+  configuration:
+    defaults:
+      plugin.name: pgoutput
+      publication.autocreate.mode: filtered
+    mapping:
+      connector.class: connector.class
+      database.hostname: connection.host
+      database.port: connection.port
+      database.user: credentials.usernameEnv
+      database.password: credentials.passwordEnv
+      database.dbname: database.name
+      topic.prefix: stream.topicPrefix
+      table.include.list: tables.includeList
+      snapshot.mode: snapshot.mode
+      plugin.name: plugin.name
   parameters: {}
 ---
 apiVersion: connections.datascape.dev/v1alpha1
@@ -612,6 +622,44 @@ spec:
   providerInstanceRef: ProviderInstance/education/reference-source
   targetCompatibility: [compose]
   parameters: {}
+---
+apiVersion: cdc.datascape.dev/v1alpha1
+kind: CDCClass
+metadata:
+  name: debezium-kafka-connect
+spec:
+  engine: kafka-connect
+  providerInstanceRef: ProviderInstance/education/reference-cdc
+  supportedConnectorClasses: [postgres-logical-replication]
+  targetCompatibility: [compose]
+  parameters:
+    image: quay.io/debezium/connect:3.6.0.Final
+    bootstrapServers: attendance-changes:9092
+  workerConfiguration:
+    config.storage.topic: datascape-reference-connect-configs
+    offset.storage.topic: datascape-reference-connect-offsets
+    status.storage.topic: datascape-reference-connect-status
+---
+apiVersion: cdc.datascape.dev/v1alpha1
+kind: CDCInstance
+metadata:
+  name: shared-operational-cdc
+  namespace: education
+spec:
+  classRef: CDCClass/debezium-kafka-connect
+  ownership: managed
+  providerInstanceRef: ProviderInstance/reference-cdc
+  replicas: 1
+  resources:
+    cpus: "1"
+    memory: 1g
+    pidsLimit: 256
+  parameters:
+    ports: [127.0.0.1:18083:8083]
+  verification:
+    checks:
+      - id: CDC-RUNTIME-REFERENCE
+        description: Kafka Connect control endpoint reports connector and task health
 ---
 apiVersion: databases.datascape.dev/v1alpha1
 kind: DatabaseInstance
@@ -677,6 +725,16 @@ spec:
 apiVersion: sources.datascape.dev/v1alpha1
 kind: RelationalSource
 metadata:
+  name: postgres-finance
+  namespace: education
+spec:
+  connectionRef: DatabaseConnection/postgres-source
+  providerInstanceRef: ProviderInstance/reference-source
+  tables: [payments, invoices]
+---
+apiVersion: sources.datascape.dev/v1alpha1
+kind: RelationalSource
+metadata:
   name: sqlite-school-context
   namespace: education
 spec:
@@ -688,6 +746,15 @@ apiVersion: streams.datascape.dev/v1alpha1
 kind: EventStream
 metadata:
   name: attendance-changes
+  namespace: education
+spec:
+  providerInstanceRef: ProviderInstance/reference-stream
+  eventClass: change
+---
+apiVersion: streams.datascape.dev/v1alpha1
+kind: EventStream
+metadata:
+  name: finance-events
   namespace: education
 spec:
   providerInstanceRef: ProviderInstance/reference-stream
@@ -772,8 +839,22 @@ metadata: {name: postgres-attendance-cdc, namespace: education}
 spec:
   sourceRef: RelationalSource/postgres-attendance
   streamRef: EventStream/attendance-changes
+  cdcRef: CDCInstance/shared-operational-cdc
   connectorClassRef: ConnectorClass/postgres-logical-replication
-  providerInstanceRef: ProviderInstance/reference-source
+  providerInstanceRef: ProviderInstance/reference-cdc
+  tables: [public.student_attendance]
+  snapshot: initial
+---
+apiVersion: bindings.datascape.dev/v1alpha1
+kind: CDCBinding
+metadata: {name: postgres-finance-cdc, namespace: education}
+spec:
+  sourceRef: RelationalSource/postgres-finance
+  streamRef: EventStream/finance-events
+  cdcRef: CDCInstance/shared-operational-cdc
+  connectorClassRef: ConnectorClass/postgres-logical-replication
+  providerInstanceRef: ProviderInstance/reference-cdc
+  tables: [public.payments, public.invoices]
   snapshot: initial
 ---
 apiVersion: bindings.datascape.dev/v1alpha1

@@ -19,6 +19,8 @@ These versions are an integrated reference set, not a universal compatibility
 claim. Before promoting a generated bundle, resolve every image to its tested
 multi-architecture digest and record the results in provider package metadata.
 
+CDC compatibility is validated across database engine, `ConnectorClass`, `CDCClass`, `CDCInstance`, provider instance and deployment target. The Compose reference supports PostgreSQL logical replication through Debezium Kafka Connect and treats SQLite as a file/batch source.
+
 Version selection is checked against upstream release and compatibility pages:
 
 - [Go releases](https://go.dev/dl/)

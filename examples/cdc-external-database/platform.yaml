@@ -1,0 +1,88 @@
+apiVersion: platform.datascape.dev/v1alpha1
+kind: Target
+metadata: {name: cdc-external-database}
+spec: {type: compose}
+---
+apiVersion: platform.datascape.dev/v1alpha1
+kind: SecretReference
+metadata: {name: external-finance-credentials, namespace: education}
+spec: {backend: env, keys: [username, password]}
+---
+apiVersion: databases.datascape.dev/v1alpha1
+kind: DatabaseClass
+metadata: {name: postgres}
+spec:
+  engine: postgresql
+  providerInstanceRef: ProviderInstance/default/local-source
+  supportedConnectorClasses: [postgres-debezium]
+---
+apiVersion: connections.datascape.dev/v1alpha1
+kind: ConnectorClass
+metadata: {name: postgres-debezium}
+spec:
+  interface: native
+  transport: tcp
+  driver: io.debezium.connector.postgresql.PostgresConnector
+  operations: [snapshot, change-stream]
+  compatibleEngines: [postgresql]
+---
+apiVersion: cdc.datascape.dev/v1alpha1
+kind: CDCClass
+metadata: {name: debezium-kafka-connect}
+spec:
+  engine: kafka-connect
+  providerInstanceRef: ProviderInstance/default/local-cdc
+  supportedConnectorClasses: [postgres-debezium]
+  targetCompatibility: [compose]
+---
+apiVersion: cdc.datascape.dev/v1alpha1
+kind: CDCInstance
+metadata: {name: internal-cdc, namespace: education}
+spec:
+  classRef: CDCClass/debezium-kafka-connect
+  ownership: managed
+  providerInstanceRef: ProviderInstance/default/local-cdc
+  resources: {memory: 1g, pidsLimit: 256}
+---
+apiVersion: databases.datascape.dev/v1alpha1
+kind: DatabaseInstance
+metadata: {name: external-finance-db, namespace: education}
+spec:
+  classRef: DatabaseClass/postgres
+  ownership: external
+  database: finance
+  credentialsRef: SecretReference/external-finance-credentials
+  verification:
+    checks:
+      - id: EXTERNAL-DB-ENDPOINT
+        description: external database endpoint is reachable
+---
+apiVersion: connections.datascape.dev/v1alpha1
+kind: DatabaseConnection
+metadata: {name: external-finance, namespace: education}
+spec:
+  instanceRef: DatabaseInstance/external-finance-db
+  connectorClassRef: ConnectorClass/postgres-debezium
+  endpoint: {host: finance.db.example, port: 5432}
+  database: finance
+  credentialsRef: SecretReference/external-finance-credentials
+---
+apiVersion: sources.datascape.dev/v1alpha1
+kind: RelationalSource
+metadata: {name: finance, namespace: education}
+spec: {connectionRef: DatabaseConnection/external-finance, tables: [public.payments]}
+---
+apiVersion: streams.datascape.dev/v1alpha1
+kind: EventStream
+metadata: {name: finance-events, namespace: education}
+spec: {}
+---
+apiVersion: bindings.datascape.dev/v1alpha1
+kind: CDCBinding
+metadata: {name: finance-cdc, namespace: education}
+spec:
+  sourceRef: RelationalSource/finance
+  streamRef: EventStream/finance-events
+  cdcRef: CDCInstance/internal-cdc
+  connectorClassRef: ConnectorClass/postgres-debezium
+  tables: [public.payments]

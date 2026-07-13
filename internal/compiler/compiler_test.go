@@ -41,7 +41,7 @@ func TestReferenceLakehouseCompilesWithDistinctClaimsAndOrderedCommands(t *testi
 	if !strings.Contains(compose, `command: ["redpanda","start","--overprovisioned"`) {
 		t.Fatalf("provider command ordering was not preserved:\n%s", compose)
 	}
-	for _, expected := range []string{"postgres-source:", "sqlite-source:", "attendance-changes:", "cdc-connector:", "cdc-register:", "lakehouse-store:", "iceberg-catalog:", "lakehouse-pipeline:", "query-engine:", "lineage-backend:"} {
+	for _, expected := range []string{"postgres-source:", "sqlite-source:", "attendance-changes:", "cdc-education-shared-operational-cdc:", "cdc-register-education-shared-operational-cdc-postgres-attendance-cdc:", "cdc-register-education-shared-operational-cdc-postgres-finance-cdc:", "lakehouse-store:", "iceberg-catalog:", "lakehouse-pipeline:", "query-engine:", "lineage-backend:"} {
 		if !strings.Contains(compose, expected) {
 			t.Fatalf("reference compose missing %s", expected)
 		}

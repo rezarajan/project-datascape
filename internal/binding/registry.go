@@ -42,6 +42,8 @@ type Resolved struct {
 	Capability        string                    `json:"capability"`
 	Source            domain.ResourceIdentity   `json:"source,omitempty"`
 	Target            domain.ResourceIdentity   `json:"target,omitempty"`
+	CDCInstance       domain.ResourceIdentity   `json:"cdcInstance,omitempty"`
+	ConnectorClass    domain.ResourceIdentity   `json:"connectorClass,omitempty"`
 	ProviderInstance  domain.ResourceIdentity   `json:"providerInstance,omitempty"`
 	Mode              string                    `json:"mode,omitempty"`
 	Ownership         string                    `json:"ownership,omitempty"`
@@ -126,7 +128,7 @@ func (r *Registry) Definitions() []Definition {
 
 func BuiltinDefinitions() []Definition {
 	return []Definition{
-		{Identity: bindingDefIdentity("cdc"), Name: "cdc", BindingKind: "CDCBinding", Capability: "datascape.dev/source.change-stream", SourceKinds: []resource.KindRef{{APIVersion: "sources.datascape.dev/v1alpha1", Kind: "RelationalSource"}}, TargetKinds: []resource.KindRef{{APIVersion: "streams.datascape.dev/v1alpha1", Kind: "EventStream"}}, ProviderTypes: []string{"datascape.dev/source"}, DependencyClosure: []string{"datascape.dev/source.relational", "datascape.dev/stream.publish"}},
+		{Identity: bindingDefIdentity("cdc"), Name: "cdc", BindingKind: "CDCBinding", Capability: "datascape.dev/source.change-stream", SourceKinds: []resource.KindRef{{APIVersion: "sources.datascape.dev/v1alpha1", Kind: "RelationalSource"}}, TargetKinds: []resource.KindRef{{APIVersion: "streams.datascape.dev/v1alpha1", Kind: "EventStream"}}, ProviderTypes: []string{"datascape.dev/cdc", "datascape.dev/source"}, DependencyClosure: []string{"datascape.dev/source.relational", "datascape.dev/stream.publish"}},
 		{Identity: bindingDefIdentity("stream-publish"), Name: "stream-publish", BindingKind: "StreamPublishBinding", Capability: "datascape.dev/stream.publish", SourceKinds: []resource.KindRef{{APIVersion: "sources.datascape.dev/v1alpha1", Kind: "EventProducer"}}, TargetKinds: []resource.KindRef{{APIVersion: "streams.datascape.dev/v1alpha1", Kind: "EventStream"}}, ProviderTypes: []string{"datascape.dev/stream"}, DependencyClosure: []string{"datascape.dev/stream.publish"}},
 		{Identity: bindingDefIdentity("stream-archive"), Name: "stream-archive", BindingKind: "StreamArchiveBinding", Capability: "datascape.dev/store.object", SourceKinds: []resource.KindRef{{APIVersion: "streams.datascape.dev/v1alpha1", Kind: "EventStream"}}, TargetKinds: []resource.KindRef{{APIVersion: "stores.datascape.dev/v1alpha1", Kind: "ObjectStore"}}, ProviderTypes: []string{"datascape.dev/store"}, DependencyClosure: []string{"datascape.dev/store.object"}},
 		{Identity: bindingDefIdentity("lineage"), Name: "lineage", BindingKind: "LineageBinding", Capability: "datascape.dev/lineage.admit", SourceKinds: bindingSourceKinds(), TargetKinds: []resource.KindRef{{APIVersion: "lineage.datascape.dev/v1alpha1", Kind: "LineageSink"}}, ProviderTypes: []string{"datascape.dev/lineage"}, DependencyClosure: []string{"datascape.dev/lineage.admit"}},
@@ -150,6 +152,8 @@ type input struct {
 	TargetField         string
 	TargetRequired      bool
 	ProviderInstanceRef string
+	CDCRef              string
+	ConnectorClassRef   string
 	Mode                string
 	Ownership           string
 	State               string
@@ -206,6 +210,8 @@ func bindingInputFromResource(res spec.Resource, registry *Registry) (input, boo
 		common.SourceField = "sourceRef"
 		common.TargetRef = stringField(body, "streamRef")
 		common.TargetField = "streamRef"
+		common.CDCRef = stringField(body, "cdcRef")
+		common.ConnectorClassRef = stringField(body, "connectorClassRef")
 	case "StreamPublishBinding":
 		common.SourceRef = stringField(body, "sourceRef")
 		common.SourceField = "sourceRef"
@@ -334,6 +340,24 @@ func Resolve(resources []spec.Resource, registry *Registry, definitions *resourc
 				diags = append(diags, diag(res, "DBIND011", "spec."+input.TargetField, "target kind is not compatible with "+capability, "choose a compatible target or update the BindingDefinition"))
 			}
 		}
+		cdcInstance := domain.ResourceIdentity{}
+		connectorClass := domain.ResourceIdentity{}
+		if input.CDCRef != "" {
+			cdcInstance = parseRef(input.CDCRef, res, "CDCInstance", target)
+			if cdcInstance.Name == "" {
+				diags = append(diags, diag(res, "DBIND016", "spec.cdcRef", "cdcRef must use Kind/name, Kind/namespace/name, or apiVersion/Kind/namespace/name", "use CDCInstance/<name> or CDCInstance/<namespace>/<name>"))
+			} else if _, ok := byID[cdcInstance.CanonicalString()]; !ok {
+				diags = append(diags, diag(res, "DBIND017", "spec.cdcRef", "CDC instance does not exist: "+input.CDCRef, "declare the CDCInstance or correct spec.cdcRef"))
+			}
+		}
+		if input.ConnectorClassRef != "" {
+			connectorClass = parseRef(input.ConnectorClassRef, res, "ConnectorClass", target)
+			if connectorClass.Name == "" {
+				diags = append(diags, diag(res, "DBIND018", "spec.connectorClassRef", "connectorClassRef must use Kind/name, Kind/namespace/name, or apiVersion/Kind/namespace/name", "use ConnectorClass/<name>"))
+			} else if _, ok := byID[connectorClass.CanonicalString()]; !ok {
+				diags = append(diags, diag(res, "DBIND019", "spec.connectorClassRef", "connector class does not exist: "+input.ConnectorClassRef, "declare the ConnectorClass or correct spec.connectorClassRef"))
+			}
+		}
 		providerInstance := domain.ResourceIdentity{}
 		if providerRef := input.ProviderInstanceRef; providerRef != "" {
 			providerInstance = parseRef(providerRef, res, "ProviderInstance", target)
@@ -342,10 +366,19 @@ func Resolve(resources []spec.Resource, registry *Registry, definitions *resourc
 			} else if !providerCompatibleForBinding(descriptor, instance, def, capability, input.Kind, target) {
 				diags = append(diags, diag(res, "DBIND015", "spec.providerInstanceRef", "provider instance does not satisfy "+input.Kind+" for "+capability, "choose a provider instance that advertises the typed binding kind and capability"))
 			}
+		} else if cdcInstance.Name != "" {
+			if cdcRes, ok := byID[cdcInstance.CanonicalString()]; ok {
+				cdcBody, _ := specBody(cdcRes)
+				if providerRef := stringField(cdcBody, "providerInstanceRef"); providerRef != "" {
+					providerInstance = parseRef(providerRef, cdcRes, "ProviderInstance", target)
+				}
+			}
 		} else if instance, descriptor, ok := providers.ResolveBinding(capability, input.Kind, target); ok {
 			if len(def.ProviderTypes) == 0 || contains(def.ProviderTypes, descriptor.Type) {
 				providerInstance = instance.Identity
 			}
+		} else if candidates := providers.BindingCandidates(capability, input.Kind, target); len(candidates) > 1 {
+			diags = append(diags, diag(res, "DBIND020", "spec.providerInstanceRef", "multiple provider instances can satisfy "+capability, "set spec.providerInstanceRef or spec.cdcRef explicitly"))
 		}
 		if providerInstance.Name == "" {
 			diags = append(diags, diag(res, "DBIND012", "spec.providerInstanceRef", "no provider instance can satisfy "+capability, "declare a compatible ProviderInstance or provider capability"))
@@ -357,6 +390,12 @@ func Resolve(resources []spec.Resource, registry *Registry, definitions *resourc
 		if targetRef.Name != "" {
 			deps = append(deps, targetRef)
 		}
+		if cdcInstance.Name != "" {
+			deps = append(deps, cdcInstance)
+		}
+		if connectorClass.Name != "" {
+			deps = append(deps, connectorClass)
+		}
 		digest, _ := bindingDigest(res, capability, source, targetRef, providerInstance)
 		state := graphState(input.Ownership, input.State)
 		resolved = append(resolved, Resolved{
@@ -366,6 +405,8 @@ func Resolve(resources []spec.Resource, registry *Registry, definitions *resourc
 			Capability:        capability,
 			Source:            source,
 			Target:            targetRef,
+			CDCInstance:       cdcInstance,
+			ConnectorClass:    connectorClass,
 			ProviderInstance:  providerInstance,
 			Mode:              input.Mode,
 			Ownership:         input.Ownership,
@@ -503,7 +544,7 @@ func parseRef(value string, owner spec.Resource, expectedKind, target string) do
 
 func clusterScopedKind(kind string) bool {
 	switch kind {
-	case "StorageClass", "PersistentVolume", "DatabaseClass", "ConnectorClass":
+	case "StorageClass", "PersistentVolume", "DatabaseClass", "ConnectorClass", "CDCClass":
 		return true
 	default:
 		return false
@@ -522,6 +563,10 @@ func apiVersionForKind(kind string) string {
 		return "connections.datascape.dev/v1alpha1"
 	case "DatabaseClass", "DatabaseInstance":
 		return "databases.datascape.dev/v1alpha1"
+	case "CDCClass", "CDCInstance":
+		return "cdc.datascape.dev/v1alpha1"
+	case "CDCOperation":
+		return "operations.datascape.dev/v1alpha1"
 	case "StorageClass", "PersistentVolume", "PersistentVolumeClaim":
 		return "storage.datascape.dev/v1alpha1"
 	case "ObjectStore", "Warehouse":
